@@ -101,6 +101,26 @@ function showDzError(msg) {
   dropzone.classList.add('error');
 }
 
+// Pick a sensible default grid resolution for this specific upload:
+// raster images that are already small (typical of pixel-art icons)
+// get sampled 1:1 so nothing is blurred or re-aliased; large raster
+// images and scale-free SVGs get the max supported detail instead.
+function pickAutoResolution(nativeW, nativeH) {
+  const MIN = 16, MAX = 64;
+  if (nativeW && nativeH) {
+    const native = Math.max(nativeW, nativeH);
+    return Math.min(MAX, Math.max(MIN, native));
+  }
+  return MAX; // SVG / unknown native size: go for maximum detail
+}
+
+function applyAutoResolution(nativeW, nativeH) {
+  const r = pickAutoResolution(nativeW, nativeH);
+  state.resolution = r;
+  resSlider.value = r;
+  resVal.textContent = `${r} × ${r}`;
+}
+
 function openFile(file) {
   if (!file) return;
   const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg');
@@ -119,6 +139,7 @@ function openFile(file) {
       img.onload = () => {
         const w = img.naturalWidth, h = img.naturalHeight;
         if (w !== h) { showDzError(`Image must be square (1:1) — yours is ${w}×${h}px`); return; }
+        applyAutoResolution(w, h);
         state.img = img;
         dzTitle.textContent = file.name;
         dropzone.classList.remove('error');
