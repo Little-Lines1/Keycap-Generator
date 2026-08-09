@@ -164,6 +164,15 @@
     font-size: 11.5px; color: var(--muted); line-height: 1.6; margin-top: 14px;
   }
 
+  .kofi-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-top: 16px; padding: 11px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--muted); text-decoration: none;
+    font-size: 13px; font-weight: 500; transition: all .12s ease;
+  }
+  .kofi-btn:hover { border-color: #ff5e5b; color: #ff5e5b; }
+
   /* ---- Viewer ---- */
   .viewer { position: relative; background: radial-gradient(ellipse at 50% 40%, #202226 0%, #101113 75%); }
   #canvas-wrap { position: absolute; inset: 0; }
@@ -251,6 +260,11 @@
       <button class="btn" id="dl-preset" disabled>Download print-settings.json</button>
     </div>
     <p class="note">Two STL files, same as your Tinkercad pixel-art workflow — import both into Bambu Studio and assign a filament per object. Already oriented flat-side-down: no supports needed. The settings file is an optional Bambu process preset (low infill, 2 walls) you can import so it doesn't default to 100% density.</p>
+
+    <a href="https://ko-fi.com/littlelines" target="_blank" rel="noopener" class="kofi-btn">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.744-.709-.741-1.508-1.978-.982-3.184.526-1.205 2.126-1.409 3.394-.408.635.499.998 1.043.998 1.043s.397-.494 1.026-1.025c1.268-1.001 2.868-.797 3.394.408.526 1.206-.273 2.443-.982 3.184z"/></svg>
+      Support this project on Ko-fi
+    </a>
   </aside>
 
   <main class="viewer">
