@@ -22,7 +22,7 @@ const WALL_INSET = 0.15;       // tiny inset so pixel layer + body don't z-fight
 const state = {
   img: null,
   scalePct: 70,
-  resolution: 48,
+  resolution: 64,
   mode: 'bw',
   baseColor: '#111214',
   iconColor: '#e9e8e4',
@@ -101,56 +101,15 @@ function showDzError(msg) {
   dropzone.classList.add('error');
 }
 
-// Pick a sensible default grid resolution for this specific upload:
-// raster images that are already small (typical of pixel-art icons)
-// get sampled 1:1 so nothing is blurred or re-aliased; large raster
-// images and scale-free SVGs get the max supported detail instead.
-function pickAutoResolution(nativeW, nativeH) {
-  const MIN = 16, MAX = 64;
-  if (nativeW && nativeH) {
-    const native = Math.max(nativeW, nativeH);
-    return Math.min(MAX, Math.max(MIN, native));
-  }
-  return MAX; // SVG / unknown native size: go for maximum detail
-}
-
-function applyAutoResolution(nativeW, nativeH) {
-  const r = pickAutoResolution(nativeW, nativeH);
-  state.resolution = r;
-  resSlider.value = r;
-  resVal.textContent = `${r} × ${r}`;
-}
+// SVG is scale-free, so grid detail is always fixed at maximum (64) —
+// see openFile() below. No auto-detection needed for a vector source.
 
 function openFile(file) {
   if (!file) return;
   const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg');
-  const isRaster = ['image/png', 'image/jpeg', 'image/webp'].includes(file.type)
-    || /\.(png|jpe?g|webp)$/i.test(file.name);
 
-  if (!isSvg && !isRaster) {
-    showDzError('Only PNG, JPG, WebP or SVG files are supported');
-    return;
-  }
-
-  if (isRaster) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const w = img.naturalWidth, h = img.naturalHeight;
-        if (w !== h) { showDzError(`Image must be square (1:1) — yours is ${w}×${h}px`); return; }
-        applyAutoResolution(w, h);
-        state.img = img;
-        dzTitle.textContent = file.name;
-        dropzone.classList.remove('error');
-        dropzone.classList.add('has-image');
-        rebuild();
-      };
-      img.onerror = () => showDzError('Could not read this image');
-      img.src = e.target.result;
-    };
-    reader.onerror = () => showDzError('Could not read this file');
-    reader.readAsDataURL(file);
+  if (!isSvg) {
+    showDzError('Only .svg files are supported');
     return;
   }
 
@@ -182,7 +141,13 @@ function openFile(file) {
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => {
-      applyAutoResolution(img.naturalWidth, img.naturalHeight);
+      // SVG is vector/scale-free — always sample at max grid detail,
+      // regardless of whatever the rasterized img.naturalWidth reports
+      // (that reflects the viewBox's own coordinate units, not real
+      // resolution, and would otherwise wrongly tank the detail level).
+      state.resolution = 64;
+      resSlider.value = 64;
+      resVal.textContent = '64 × 64';
       state.img = img;
       dzTitle.textContent = file.name;
       dropzone.classList.remove('error');
