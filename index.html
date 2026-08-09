@@ -200,9 +200,9 @@
       <div class="dropzone" id="dropzone">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
         <div class="dz-title" id="dz-title">Drop image or click to upload</div>
-        <div class="dz-sub">PNG, JPG, WebP or SVG · must be square (1:1)</div>
+        <div class="dz-sub">.svg only · must be square (1:1)</div>
       </div>
-      <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.webp,.svg,image/png,image/jpeg,image/webp,image/svg+xml">
+      <input type="file" id="file-input" accept=".svg,image/svg+xml">
       <p class="note" id="upload-error" style="color:var(--danger);display:none;margin-top:10px"></p>
     </div>
 
@@ -212,8 +212,8 @@
     </div>
 
     <div class="field">
-      <label>Detail <span class="val" id="res-val">48 × 48</span></label>
-      <input type="range" id="resolution" min="16" max="64" value="48">
+      <label>Detail <span class="val" id="res-val">64 × 64</span></label>
+      <input type="range" id="resolution" min="16" max="64" value="64">
       <p class="note" id="res-auto-note" style="margin-top:6px">Auto-set from your upload — drag to trade detail for less filament/time.</p>
     </div>
 
