@@ -174,12 +174,12 @@ dropzone.addEventListener('drop', (e) => openFile(e.dataTransfer.files[0]));
 scaleSlider.addEventListener('input', () => {
   state.scalePct = +scaleSlider.value;
   scaleVal.textContent = state.scalePct + '%';
-  rebuild();
+  scheduleRebuild();
 });
 resSlider.addEventListener('input', () => {
   state.resolution = +resSlider.value;
   resVal.textContent = `${state.resolution} × ${state.resolution}`;
-  rebuild();
+  scheduleRebuild();
 });
 seg.forEach(btn => btn.addEventListener('click', () => {
   seg.forEach(b => b.classList.remove('active'));
@@ -252,16 +252,48 @@ function averageColor(colors, mask, want) {
 }
 
 // ---------------------------------------------------------------
-// Geometry builders
-// ---------------------------------------------------------------
-
 // Box helper: returns a BufferGeometry translated to CENTER coordinates
-// (mm), position baked into the vertices so many of these can be merged
-// into a single mesh later instead of creating one Mesh per box.
+// (mm) — only used at export time now (see exportMeshFromBoxes below).
 function boxGeom(sx, sy, sz, cx, cy, cz) {
   const geo = new THREE.BoxGeometry(sx, sy, sz);
   geo.translate(cx, cy, cz);
   return geo;
+}
+
+// Box descriptor: cheap {sx,sy,sz,cx,cy,cz} object (mm) — cheap to
+// generate by the thousands. Real geometry is only built from these
+// where it's actually needed (instanced preview, or STL export).
+function boxDesc(sx, sy, sz, cx, cy, cz) {
+  return { sx, sy, sz, cx, cy, cz };
+}
+
+// One shared unit cube, reused (scaled per-instance) for every pixel in
+// the live preview — this is what makes high detail levels fast: no new
+// geometry is allocated per pixel, just a transform matrix.
+const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
+
+function instancedPreview(boxes, color) {
+  const group = new THREE.Group();
+  if (!boxes.length) return group;
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
+  const inst = new THREE.InstancedMesh(UNIT_BOX, mat, boxes.length);
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  boxes.forEach((b, i) => {
+    m.compose(new THREE.Vector3(b.cx, b.cy, b.cz), q, new THREE.Vector3(b.sx, b.sy, b.sz));
+    inst.setMatrixAt(i, m);
+  });
+  inst.instanceMatrix.needsUpdate = true;
+  group.add(inst);
+  return group;
+}
+
+// Turns box descriptors into ONE real, mergeable mesh — only called at
+// STL export time (a rare, one-off action), never during live preview.
+function exportMeshFromBoxes(boxes) {
+  const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
+  const merged = mergeGeometries(geoms, false);
+  return new THREE.Mesh(merged, new THREE.MeshStandardMaterial());
 }
 
 // Builds the solid body (Y from yBottom..yTop) around a centered
@@ -272,50 +304,34 @@ function crossFrameBoxes(yBottom, yTop) {
   const armHalfW = CROSS_W / 2;       // blade half-thickness
   const h = yTop - yBottom;
   const cy = (yTop + yBottom) / 2;
-  const geoms = [];
+  const b = [];
 
-  // top strip (beyond +Z arm reach) and bottom strip (beyond -Z arm reach)
-  geoms.push(boxGeom(CAP, h, half - armHalfLen, 0, cy, (armHalfLen + half) / 2));
-  geoms.push(boxGeom(CAP, h, half - armHalfLen, 0, cy, -(armHalfLen + half) / 2));
+  b.push(boxDesc(CAP, h, half - armHalfLen, 0, cy, (armHalfLen + half) / 2));
+  b.push(boxDesc(CAP, h, half - armHalfLen, 0, cy, -(armHalfLen + half) / 2));
 
-  // left / right strips spanning the full arm band, outside the arm's X reach
-  const bandZ = CROSS_LEN; // full band depth = 2*armHalfLen
-  geoms.push(boxGeom(half - armHalfLen, h, bandZ, (armHalfLen + half) / 2, cy, 0));
-  geoms.push(boxGeom(half - armHalfLen, h, bandZ, -(armHalfLen + half) / 2, cy, 0));
+  const bandZ = CROSS_LEN;
+  b.push(boxDesc(half - armHalfLen, h, bandZ, (armHalfLen + half) / 2, cy, 0));
+  b.push(boxDesc(half - armHalfLen, h, bandZ, -(armHalfLen + half) / 2, cy, 0));
 
-  // four quadrant fillers between the blades (upper/lower x left/right)
-  const qW = armHalfLen - armHalfW; // width of filler between blade edge and arm reach
+  const qW = armHalfLen - armHalfW;
   const qZcenter = (armHalfW + armHalfLen) / 2;
-  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, qZcenter));
-  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, -qZcenter));
-  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, qZcenter));
-  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, -qZcenter));
+  b.push(boxDesc(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, qZcenter));
+  b.push(boxDesc(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, -qZcenter));
+  b.push(boxDesc(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, qZcenter));
+  b.push(boxDesc(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, -qZcenter));
 
-  return geoms;
-}
-
-// Wraps a merged BufferGeometry in a single Mesh inside a Group, so the
-// rest of the app (preview, STL export) can keep treating "base"/"icon"
-// as one object each — regardless of how many boxes went into it.
-function meshFromGeoms(geoms, color) {
-  const group = new THREE.Group();
-  if (!geoms.length) return group;
-  const merged = mergeGeometries(geoms, false);
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
-  group.add(new THREE.Mesh(merged, mat));
-  return group;
+  return b;
 }
 
 function buildKeycap() {
   if (!state.mask) {
-    return { baseGroup: new THREE.Group(), iconGroup: new THREE.Group() };
+    return { baseBoxes: [], iconBoxes: [], baseHex: state.baseColor, iconHex: state.iconColor };
   }
 
   const N = state.resolution;
   const cell = CAP / N;
   const half = CAP / 2;
 
-  // determine per-pixel display colors
   let baseHex = state.baseColor, iconHex = state.iconColor;
   if (state.mode === 'color' && state._colors) {
     baseHex = averageColor(state._colors, state.mask, 0);
@@ -324,32 +340,31 @@ function buildKeycap() {
     fillIcon.style.background = iconHex;
   }
 
-  const baseGeoms = [];
-  const iconGeoms = [];
+  const baseBoxes = [];
+  const iconBoxes = [];
 
-  // ---- top pixel layer (Y: 0 .. PIXEL_H) ----
   for (let row = 0; row < N; row++) {
     for (let col = 0; col < N; col++) {
       const idx = row * N + col;
       const isIcon = state.mask[idx] === 1;
       const cx = -half + cell * (col + 0.5);
       const cz = -half + cell * (row + 0.5);
-      const g = boxGeom(cell + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz);
-      (isIcon ? iconGeoms : baseGeoms).push(g);
+      const d = boxDesc(cell + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz);
+      (isIcon ? iconBoxes : baseBoxes).push(d);
     }
   }
 
-  // ---- thin solid cap between pixel layer and stem socket ----
   const capFloorTop = PIXEL_H + SOCKET_MARGIN;
-  baseGeoms.push(boxGeom(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
+  baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
+  baseBoxes.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
 
-  // ---- body with cross socket (Y: capFloorTop .. TOTAL_H) ----
-  baseGeoms.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
+  return { baseBoxes, iconBoxes, baseHex, iconHex };
+}
 
-  const baseGroup = meshFromGeoms(baseGeoms, baseHex);
-  const iconGroup = meshFromGeoms(iconGeoms, iconHex);
-
-  return { baseGroup, iconGroup };
+let rebuildTimer = null;
+function scheduleRebuild() {
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(rebuild, 120);
 }
 
 function rebuild() {
@@ -360,7 +375,9 @@ function rebuild() {
   state._colors = colors;
 
   if (capGroup) { scene.remove(capGroup); }
-  const { baseGroup, iconGroup } = buildKeycap();
+  const { baseBoxes, iconBoxes, baseHex, iconHex } = buildKeycap();
+  const baseGroup = instancedPreview(baseBoxes, baseHex);
+  const iconGroup = instancedPreview(iconBoxes, iconHex);
   capGroup = new THREE.Group();
   capGroup.add(baseGroup, iconGroup);
   // The icon layer sits at local Y=0..0.8, the stem socket opening at
@@ -369,8 +386,8 @@ function rebuild() {
   capGroup.rotation.x = Math.PI;
   scene.add(capGroup);
 
-  state._baseGroup = baseGroup;
-  state._iconGroup = iconGroup;
+  state._baseBoxes = baseBoxes;
+  state._iconBoxes = iconBoxes;
 
   emptyState.style.display = 'none';
   viewerHint.style.display = 'block';
@@ -386,12 +403,10 @@ function rebuild() {
 // rotate -90° about X on export only, so downloaded files already
 // sit flat-side-down with no reorientation needed in the slicer.
 // ---------------------------------------------------------------
-function exportGroup(group, filename) {
+function exportBoxes(boxes, filename) {
+  const mesh = exportMeshFromBoxes(boxes);
   const exportScene = new THREE.Group();
-  group.children.forEach(child => {
-    const clone = child.clone();
-    exportScene.add(clone);
-  });
+  exportScene.add(mesh);
   exportScene.rotation.x = Math.PI / 2;
   exportScene.updateMatrixWorld(true);
 
@@ -406,12 +421,12 @@ function exportGroup(group, filename) {
 }
 
 dlBaseBtn.addEventListener('click', () => {
-  if (!state._baseGroup) return;
-  exportGroup(state._baseGroup, 'keycap-base.stl');
+  if (!state._baseBoxes || !state._baseBoxes.length) return;
+  exportBoxes(state._baseBoxes, 'keycap-base.stl');
 });
 dlIconBtn.addEventListener('click', () => {
-  if (!state._iconGroup) return;
-  exportGroup(state._iconGroup, 'keycap-icon.stl');
+  if (!state._iconBoxes || !state._iconBoxes.length) return;
+  exportBoxes(state._iconBoxes, 'keycap-icon.stl');
 });
 
 // ---------------------------------------------------------------
