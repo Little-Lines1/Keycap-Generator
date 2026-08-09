@@ -22,7 +22,7 @@ const WALL_INSET = 0.15;       // tiny inset so pixel layer + body don't z-fight
 const state = {
   img: null,
   scalePct: 70,
-  resolution: 264,
+  resolution: 128,
   mode: 'bw',
   baseColor: '#111214',
   iconColor: '#e9e8e4',
