@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /* ---------------------------------------------------------------
    Keycap Forge
@@ -22,7 +23,7 @@ const WALL_INSET = 0.15;       // tiny inset so pixel layer + body don't z-fight
 const state = {
   img: null,
   scalePct: 70,
-  resolution: 128,
+  resolution: 64,
   mode: 'bw',
   baseColor: '#111214',
   iconColor: '#e9e8e4',
@@ -254,52 +255,60 @@ function averageColor(colors, mask, want) {
 // Geometry builders
 // ---------------------------------------------------------------
 
-// Box helper: returns a Mesh positioned by CENTER coordinates (mm),
-// with y = up (three.js), footprint on XZ, height on Y.
-function box(sx, sy, sz, cx, cy, cz, color) {
+// Box helper: returns a BufferGeometry translated to CENTER coordinates
+// (mm), position baked into the vertices so many of these can be merged
+// into a single mesh later instead of creating one Mesh per box.
+function boxGeom(sx, sy, sz, cx, cy, cz) {
   const geo = new THREE.BoxGeometry(sx, sy, sz);
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
-  const m = new THREE.Mesh(geo, mat);
-  m.position.set(cx, cy, cz);
-  return m;
+  geo.translate(cx, cy, cz);
+  return geo;
 }
 
 // Builds the solid body (Y from yBottom..yTop) around a centered
 // cross-shaped cavity, as 8 non-overlapping boxes (no CSG needed).
-function crossFrameBoxes(yBottom, yTop, color) {
+function crossFrameBoxes(yBottom, yTop) {
   const half = CAP / 2;
   const armHalfLen = CROSS_LEN / 2;   // how far each blade extends from center
   const armHalfW = CROSS_W / 2;       // blade half-thickness
   const h = yTop - yBottom;
   const cy = (yTop + yBottom) / 2;
-  const meshes = [];
+  const geoms = [];
 
   // top strip (beyond +Z arm reach) and bottom strip (beyond -Z arm reach)
-  meshes.push(box(CAP, h, half - armHalfLen, 0, cy, (armHalfLen + half) / 2, color));
-  meshes.push(box(CAP, h, half - armHalfLen, 0, cy, -(armHalfLen + half) / 2, color));
+  geoms.push(boxGeom(CAP, h, half - armHalfLen, 0, cy, (armHalfLen + half) / 2));
+  geoms.push(boxGeom(CAP, h, half - armHalfLen, 0, cy, -(armHalfLen + half) / 2));
 
   // left / right strips spanning the full arm band, outside the arm's X reach
   const bandZ = CROSS_LEN; // full band depth = 2*armHalfLen
-  meshes.push(box(half - armHalfLen, h, bandZ, (armHalfLen + half) / 2, cy, 0, color));
-  meshes.push(box(half - armHalfLen, h, bandZ, -(armHalfLen + half) / 2, cy, 0, color));
+  geoms.push(boxGeom(half - armHalfLen, h, bandZ, (armHalfLen + half) / 2, cy, 0));
+  geoms.push(boxGeom(half - armHalfLen, h, bandZ, -(armHalfLen + half) / 2, cy, 0));
 
   // four quadrant fillers between the blades (upper/lower x left/right)
   const qW = armHalfLen - armHalfW; // width of filler between blade edge and arm reach
   const qZcenter = (armHalfW + armHalfLen) / 2;
-  meshes.push(box(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, qZcenter, color));
-  meshes.push(box(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, -qZcenter, color));
-  meshes.push(box(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, qZcenter, color));
-  meshes.push(box(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, -qZcenter, color));
+  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, qZcenter));
+  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, (armHalfW + armHalfLen) / 2, cy, -qZcenter));
+  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, qZcenter));
+  geoms.push(boxGeom(qW, h, armHalfLen - armHalfW, -(armHalfW + armHalfLen) / 2, cy, -qZcenter));
 
-  return meshes;
+  return geoms;
+}
+
+// Wraps a merged BufferGeometry in a single Mesh inside a Group, so the
+// rest of the app (preview, STL export) can keep treating "base"/"icon"
+// as one object each — regardless of how many boxes went into it.
+function meshFromGeoms(geoms, color) {
+  const group = new THREE.Group();
+  if (!geoms.length) return group;
+  const merged = mergeGeometries(geoms, false);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
+  group.add(new THREE.Mesh(merged, mat));
+  return group;
 }
 
 function buildKeycap() {
-  const baseGroup = new THREE.Group();
-  const iconGroup = new THREE.Group();
-
   if (!state.mask) {
-    return { baseGroup, iconGroup };
+    return { baseGroup: new THREE.Group(), iconGroup: new THREE.Group() };
   }
 
   const N = state.resolution;
@@ -315,6 +324,9 @@ function buildKeycap() {
     fillIcon.style.background = iconHex;
   }
 
+  const baseGeoms = [];
+  const iconGeoms = [];
+
   // ---- top pixel layer (Y: 0 .. PIXEL_H) ----
   for (let row = 0; row < N; row++) {
     for (let col = 0; col < N; col++) {
@@ -322,17 +334,20 @@ function buildKeycap() {
       const isIcon = state.mask[idx] === 1;
       const cx = -half + cell * (col + 0.5);
       const cz = -half + cell * (row + 0.5);
-      const m = box(cell + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz, isIcon ? iconHex : baseHex);
-      (isIcon ? iconGroup : baseGroup).add(m);
+      const g = boxGeom(cell + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz);
+      (isIcon ? iconGeoms : baseGeoms).push(g);
     }
   }
 
   // ---- thin solid cap between pixel layer and stem socket ----
   const capFloorTop = PIXEL_H + SOCKET_MARGIN;
-  baseGroup.add(box(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0, baseHex));
+  baseGeoms.push(boxGeom(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
 
   // ---- body with cross socket (Y: capFloorTop .. TOTAL_H) ----
-  crossFrameBoxes(capFloorTop, TOTAL_H, baseHex).forEach(m => baseGroup.add(m));
+  baseGeoms.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
+
+  const baseGroup = meshFromGeoms(baseGeoms, baseHex);
+  const iconGroup = meshFromGeoms(iconGeoms, iconHex);
 
   return { baseGroup, iconGroup };
 }
