@@ -54,7 +54,7 @@ const viewerHint = document.getElementById('viewer-hint');
 const wrap = document.getElementById('canvas-wrap');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 500);
-camera.position.set(13, 22, 15);
+camera.position.set(13, -22, 15);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -65,14 +65,14 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 12;
 controls.maxDistance = 90;
-controls.target.set(0, -TOTAL_H / 2, 0);
+controls.target.set(0, 0, 0);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.65));
 const key = new THREE.DirectionalLight(0xffffff, 1.1);
-key.position.set(20, 30, 15);
+key.position.set(20, -30, 15);
 scene.add(key);
 const rim = new THREE.DirectionalLight(0x5eead4, 0.35);
-rim.position.set(-20, 10, -15);
+rim.position.set(-20, -10, -15);
 scene.add(rim);
 
 let capGroup = null; // holds current preview meshes
@@ -383,7 +383,12 @@ function rebuild() {
   // The icon layer sits at local Y=0..0.8, the stem socket opening at
   // the top (Y≈4.5). Flip 180° so the ICON faces the camera by default
   // instead of the stem-socket cavity (that cross-shaped "dent" you saw).
-  capGroup.rotation.x = Math.PI;
+  // Don't rotate the model to reveal the icon face — flipping a flat
+  // panel 180° about an in-plane axis mirrors whatever's printed on it.
+  // Instead the camera itself sits below, looking up at the icon
+  // (Y=0 face), matching the actual printed-face-down orientation
+  // without ever touching the geometry.
+  capGroup.rotation.x = 0;
   scene.add(capGroup);
 
   state._baseBoxes = baseBoxes;
