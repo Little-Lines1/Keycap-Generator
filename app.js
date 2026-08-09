@@ -22,7 +22,7 @@ const WALL_INSET = 0.15;       // tiny inset so pixel layer + body don't z-fight
 const state = {
   img: null,
   scalePct: 70,
-  resolution: 28,
+  resolution: 48,
   mode: 'bw',
   baseColor: '#111214',
   iconColor: '#e9e8e4',
@@ -182,6 +182,7 @@ function openFile(file) {
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => {
+      applyAutoResolution(img.naturalWidth, img.naturalHeight);
       state.img = img;
       dzTitle.textContent = file.name;
       dropzone.classList.remove('error');
