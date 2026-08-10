@@ -310,7 +310,41 @@ function rleBoxesFromFlags(flags, N, layerCenterY) {
       boxes.push(boxDesc(cell * runLen, PIXEL_H, cell, cx, layerCenterY, cz));
     }
   }
-  return boxes;
+  return mergeVerticalRuns(boxes, cell);
+}
+
+// Second pass: after row-based merging, stack boxes that share the
+// exact same X-span across consecutive rows into one taller box.
+// Between this and the row merge, a solid rectangular region of the
+// icon collapses to a handful of boxes instead of hundreds — far
+// fewer touching faces, so far fewer "open edge" artifacts once the
+// final mesh gets welded (no manual repair needed on the user's end).
+function mergeVerticalRuns(boxes, cell) {
+  const groups = new Map();
+  boxes.forEach(b => {
+    const key = `${b.cx.toFixed(5)}_${b.sx.toFixed(5)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b);
+  });
+
+  const merged = [];
+  groups.forEach(list => {
+    list.sort((a, b) => a.cz - b.cz);
+    let cur = null;
+    for (const b of list) {
+      if (cur && Math.abs((cur.cz + cur.sz / 2) - (b.cz - b.sz / 2)) < cell * 1e-3) {
+        const newBottom = cur.cz - cur.sz / 2;
+        const newTop = b.cz + b.sz / 2;
+        cur.sz = newTop - newBottom;
+        cur.cz = (newTop + newBottom) / 2;
+      } else {
+        if (cur) merged.push(cur);
+        cur = { ...b };
+      }
+    }
+    if (cur) merged.push(cur);
+  });
+  return merged;
 }
 
 const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
