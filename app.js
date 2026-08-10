@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /* ---------------------------------------------------------------
    Keycap Forge
@@ -46,7 +46,7 @@ const viewerHint = document.getElementById('viewer-hint');
 const wrap = document.getElementById('canvas-wrap');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 500);
-camera.position.set(13, -22, 15);
+camera.position.set(13, 22, 15);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -57,14 +57,14 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 12;
 controls.maxDistance = 90;
-controls.target.set(0, 0, 0);
+controls.target.set(0, TOTAL_H / 2, 0);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.65));
 const key = new THREE.DirectionalLight(0xffffff, 1.1);
-key.position.set(20, -30, 15);
+key.position.set(20, 30, 15);
 scene.add(key);
 const rim = new THREE.DirectionalLight(0x5eead4, 0.35);
-rim.position.set(-20, -10, -15);
+rim.position.set(-20, 10, -15);
 scene.add(rim);
 
 let capGroup = null;
@@ -294,7 +294,7 @@ function boxDesc(sx, sy, sz, cx, cy, cz) {
 // difference between a handful of wide strips and 160,000 individual
 // boxes. Keeps both the live preview and the exported file light
 // regardless of detail level or how many color groups there are.
-function rleBoxesFromFlags(flags, N) {
+function rleBoxesFromFlags(flags, N, layerCenterY) {
   const cell = CAP / N;
   const half = CAP / 2;
   const boxes = [];
@@ -307,7 +307,7 @@ function rleBoxesFromFlags(flags, N) {
       const runLen = col - start;
       const cx = -half + cell * (start + runLen / 2);
       const cz = -half + cell * (row + 0.5);
-      boxes.push(boxDesc(cell * runLen + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz));
+      boxes.push(boxDesc(cell * runLen, PIXEL_H, cell, cx, layerCenterY, cz));
     }
   }
   return boxes;
@@ -362,12 +362,18 @@ function buildKeycap() {
   const N = state.resolution;
   const groups = [];
 
-  const capFloorTop = PIXEL_H + SOCKET_MARGIN;
+  // Icon/pixel layer now sits at the TOP of the local model (Y near
+  // TOTAL_H) with the socket body underneath — so a plain camera above
+  // the model shows the icon directly, no flip/rotate trick needed to
+  // "reveal" it (that trick is exactly what was mirroring it before).
+  const pixelCenterY = TOTAL_H - PIXEL_H / 2;
+  const socketTop = TOTAL_H - PIXEL_H - SOCKET_MARGIN;
+
   const baseFlags = new Uint8Array(state.mask.length);
   for (let i = 0; i < state.mask.length; i++) baseFlags[i] = state.mask[i] === 0 ? 1 : 0;
-  const baseBoxes = rleBoxesFromFlags(baseFlags, N);
-  baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
-  baseBoxes.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
+  const baseBoxes = rleBoxesFromFlags(baseFlags, N, pixelCenterY);
+  baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, socketTop + SOCKET_MARGIN / 2, 0));
+  baseBoxes.push(...crossFrameBoxes(0, socketTop));
   groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
   if (state.mode === 'color' && state._colors) {
@@ -378,12 +384,12 @@ function buildKeycap() {
       for (let i = 0; i < state.mask.length; i++) {
         flags[i] = (state.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
       }
-      const boxes = rleBoxesFromFlags(flags, N);
+      const boxes = rleBoxesFromFlags(flags, N, pixelCenterY);
       if (boxes.length) groups.push({ boxes, hex: c.hex });
     });
   } else {
     darkIconNote.style.display = 'none';
-    const iconBoxes = rleBoxesFromFlags(state.mask, N); // mask is already 0/1
+    const iconBoxes = rleBoxesFromFlags(state.mask, N, pixelCenterY); // mask is already 0/1
     if (iconBoxes.length) groups.push({ boxes: iconBoxes, hex: '#ffffff' });
   }
 
@@ -423,12 +429,27 @@ function rebuild() {
 // ---------------------------------------------------------------
 function meshGeoFromBoxes(boxes) {
   const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
-  return mergeGeometries(geoms, false);
+  const merged = mergeGeometries(geoms, false);
+  // Each box's per-face vertices carry their own normal/uv, so a plain
+  // position-only match never welds anything — box A's and box B's
+  // touching face look identical in space but "different" attribute-
+  // wise. Drop normal/uv first so welding only cares about position,
+  // then rebuild normals afterwards. This is what was showing up in
+  // Bambu Studio as thousands of "open edges" needing repair.
+  merged.deleteAttribute('normal');
+  merged.deleteAttribute('uv');
+  const welded = mergeVertices(merged, 1e-5);
+  welded.computeVertexNormals();
+  return welded;
 }
 
 // local (Y-up, flat face at y=0) -> print (Z-up, flat face at z=0)
+// local (Y-up, icon layer at top y=TOTAL_H) -> print (Z-up, icon flat
+// face on the bed at z=0). Rotate -90° about X (x'=x, y'=z, z'=-y),
+// then shift up by TOTAL_H so the icon face lands at z=0 and the
+// socket opening ends up on top (away from the bed, no supports).
 function toPrintSpace(px, py, pz) {
-  return [px, -pz, py];
+  return [px, pz, TOTAL_H - py];
 }
 
 function geometryToXml(geo) {
