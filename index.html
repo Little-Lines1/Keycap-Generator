@@ -223,10 +223,11 @@
       <div class="dropzone" id="dropzone">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
         <div class="dz-title" id="dz-title">Drop image or click to upload</div>
-        <div class="dz-sub">.svg only · must be square (1:1)</div>
+        <div class="dz-sub">.svg only · any shape, auto-centered</div>
       </div>
       <input type="file" id="file-input" accept=".svg,image/svg+xml">
       <p class="note" id="upload-error" style="color:var(--danger);display:none;margin-top:10px"></p>
+      <p class="note">Need an SVG? <strong>Little Lines</strong> recommends <a href="https://worldvectorlogo.com" target="_blank" rel="noopener" style="color:var(--accent)">worldvectorlogo.com</a> or <a href="https://seeklogo.com" target="_blank" rel="noopener" style="color:var(--accent)">seeklogo.com</a>.</p>
     </div>
 
     <div class="field">
@@ -235,25 +236,15 @@
     </div>
 
     <div class="field">
-      <label>Detail <span class="val" id="res-val">128 × 128</span></label>
-      <input type="range" id="resolution" min="16" max="220" value="128">
+      <label>Detail <span class="val" id="res-val">400 × 400</span></label>
+      <input type="range" id="resolution" min="16" max="400" value="400">
     </div>
 
     <div class="field">
       <label>Rendering</label>
       <div class="seg">
-        <button class="active" data-mode="bw">Black / White</button>
-        <button data-mode="color">Uploaded colors</button>
-      </div>
-    </div>
-
-    <div class="field" id="color-field">
-      <label>Colors</label>
-      <div class="swatches">
-        <div class="swatch-pick" id="pick-base"><div class="fill" id="fill-base" style="background:#111214"></div><input type="color" id="color-base" value="#111214"></div>
-        <span class="swatch-label">base</span>
-        <div class="swatch-pick" id="pick-icon" style="margin-left:8px"><div class="fill" id="fill-icon" style="background:#e9e8e4"></div><input type="color" id="color-icon" value="#e9e8e4"></div>
-        <span class="swatch-label">icon</span>
+        <button class="active" data-mode="color">Original colors</button>
+        <button data-mode="bw">Black / White</button>
       </div>
     </div>
 
@@ -265,20 +256,20 @@
       <div class="row"><span>Profile</span><strong>Flat / G20</strong></div>
       <div class="row"><span>Stem</span><strong>Cherry MX cross</strong></div>
       <div class="row"><span>Print orientation</span><strong>Face-down, baked in</strong></div>
+      <div class="row"><span>Keycap body</span><strong>Always black</strong></div>
     </div>
 
     <div class="actions">
-      <button class="btn primary" id="dl-icon" disabled>Download icon.stl (2nd color)</button>
-      <button class="btn" id="dl-base" disabled>Download base.stl (1st color)</button>
-      <button class="btn" id="dl-preset" disabled>Download print-settings.json</button>
+      <button class="btn primary" id="dl-3mf" disabled>Download keycap.3mf (multi-color)</button>
     </div>
+    <p class="note">One file, base + icon already colored — import it into Bambu Studio and it slices as multi-color automatically, no manual filament assignment needed.</p>
   </aside>
 
   <main class="viewer">
     <div id="canvas-wrap"></div>
     <a href="https://ko-fi.com/littlelines" target="_blank" rel="noopener" class="kofi-float">
       <svg width="17" height="17" viewBox="0 0 24 24" fill="#fff"><path d="M23.881 8.948c-.773-4.085-4.859-4.593-4.859-4.593H.723c-.604 0-.679.798-.679.798s-.082 7.324-.022 11.822c.164 2.424 2.586 2.672 2.586 2.672s8.267-.023 11.966-.049c2.438-.426 2.683-2.566 2.658-3.734 4.352.24 7.422-2.831 6.649-6.916zm-11.062 3.511c-1.246 1.453-4.011 3.976-4.011 3.976s-.121.119-.31.023c-.076-.057-.108-.09-.108-.09-.443-.441-3.368-3.049-4.034-3.744-.709-.741-1.508-1.978-.982-3.184.526-1.205 2.126-1.409 3.394-.408.635.499.998 1.043.998 1.043s.397-.494 1.026-1.025c1.268-1.001 2.868-.797 3.394.408.526 1.206-.273 2.443-.982 3.184z"/></svg>
-      Support Little Lines
+      Buy me a Ko-fi
     </a>
     <div class="empty-state" id="empty-state">
       <div class="mark-big">
