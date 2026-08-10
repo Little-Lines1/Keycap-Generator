@@ -216,6 +216,67 @@ function averageColor(colors, mask, want) {
   return `#${toHex(r / n)}${toHex(g / n)}${toHex(b / n)}`;
 }
 
+function hexLuminance(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function rgbToHex(r, g, b) {
+  const h = v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0');
+  return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+// Simple k-means over the icon pixels' RGB values, so a logo that is
+// itself multi-color (e.g. YouTube's red badge + white triangle) comes
+// out as several distinct print colors instead of being flattened into
+// one averaged blob. Returns up to K non-empty clusters as
+// { hex, assign(pixelIndex) } — clusters with no pixels are dropped.
+function clusterIconColors(colors, mask, K) {
+  const idxs = [];
+  for (let i = 0; i < mask.length; i++) if (mask[i] === 1) idxs.push(i);
+  if (!idxs.length) return [];
+
+  const k = Math.min(K, idxs.length);
+  // seed centroids evenly across the icon pixel list for a stable,
+  // deterministic start (no RNG needed)
+  let centroids = [];
+  for (let c = 0; c < k; c++) {
+    const pick = idxs[Math.floor((c + 0.5) * idxs.length / k)];
+    centroids.push(colors[pick].slice());
+  }
+
+  let assignment = new Uint8Array(mask.length);
+  for (let iter = 0; iter < 6; iter++) {
+    for (const i of idxs) {
+      const [r, g, b] = colors[i];
+      let best = 0, bestD = Infinity;
+      for (let c = 0; c < k; c++) {
+        const [cr, cg, cb] = centroids[c];
+        const d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      assignment[i] = best;
+    }
+    const sums = Array.from({ length: k }, () => [0, 0, 0, 0]);
+    for (const i of idxs) {
+      const s = sums[assignment[i]];
+      s[0] += colors[i][0]; s[1] += colors[i][1]; s[2] += colors[i][2]; s[3]++;
+    }
+    centroids = sums.map((s, c) => s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : centroids[c]);
+  }
+
+  const clusters = [];
+  for (let c = 0; c < k; c++) {
+    const count = idxs.reduce((n, i) => n + (assignment[i] === c ? 1 : 0), 0);
+    if (!count) continue;
+    let hex = rgbToHex(...centroids[c]);
+    if (hexLuminance(hex) < 45) hex = '#ffffff'; // stay visible on the black base
+    clusters.push({ id: c, hex });
+  }
+  return { clusters, assignment };
+}
+
 // ---------------------------------------------------------------
 // Geometry builders
 // ---------------------------------------------------------------
@@ -228,20 +289,21 @@ function boxDesc(sx, sy, sz, cx, cy, cz) {
   return { sx, sy, sz, cx, cy, cz };
 }
 
-// Run-length-encode each row of the mask into horizontal spans instead
-// of one box per pixel — at ~400x400 that's the difference between a
-// handful of wide strips and 160,000 individual boxes. Keeps both the
-// live preview and the exported file light regardless of detail level.
-function rleBoxesFromMask(mask, N, want) {
+// Run-length-encode each row of a boolean flag array into horizontal
+// spans instead of one box per pixel — at ~400x400 that's the
+// difference between a handful of wide strips and 160,000 individual
+// boxes. Keeps both the live preview and the exported file light
+// regardless of detail level or how many color groups there are.
+function rleBoxesFromFlags(flags, N) {
   const cell = CAP / N;
   const half = CAP / 2;
   const boxes = [];
   for (let row = 0; row < N; row++) {
     let col = 0;
     while (col < N) {
-      if (mask[row * N + col] !== want) { col++; continue; }
+      if (!flags[row * N + col]) { col++; continue; }
       const start = col;
-      while (col < N && mask[row * N + col] === want) col++;
+      while (col < N && flags[row * N + col]) col++;
       const runLen = col - start;
       const cx = -half + cell * (start + runLen / 2);
       const cz = -half + cell * (row + 0.5);
@@ -294,35 +356,38 @@ function crossFrameBoxes(yBottom, yTop) {
   return b;
 }
 
-function hexLuminance(hex) {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
 function buildKeycap() {
-  if (!state.mask) return { baseBoxes: [], iconBoxes: [], iconHex: state.iconColor };
+  if (!state.mask) return { groups: [] };
 
   const N = state.resolution;
-  let iconHex = '#ffffff';
-  let wasTooDark = false;
-  if (state.mode === 'color' && state._colors) {
-    iconHex = averageColor(state._colors, state.mask, 1);
-    // The keycap body is always black — a near-black icon on it would
-    // be invisible, so fall back to white automatically in that case.
-    if (hexLuminance(iconHex) < 45) { iconHex = '#ffffff'; wasTooDark = true; }
-  }
-  darkIconNote.style.display = wasTooDark ? 'block' : 'none';
-
-  const baseBoxes = rleBoxesFromMask(state.mask, N, 0);
-  const iconBoxes = rleBoxesFromMask(state.mask, N, 1);
+  const groups = [];
 
   const capFloorTop = PIXEL_H + SOCKET_MARGIN;
+  const baseFlags = new Uint8Array(state.mask.length);
+  for (let i = 0; i < state.mask.length; i++) baseFlags[i] = state.mask[i] === 0 ? 1 : 0;
+  const baseBoxes = rleBoxesFromFlags(baseFlags, N);
   baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
   baseBoxes.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
+  groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
-  return { baseBoxes, iconBoxes, iconHex };
+  if (state.mode === 'color' && state._colors) {
+    const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3);
+    darkIconNote.style.display = clusters.some(c => c.hex === '#ffffff') ? 'block' : 'none';
+    clusters.forEach(c => {
+      const flags = new Uint8Array(state.mask.length);
+      for (let i = 0; i < state.mask.length; i++) {
+        flags[i] = (state.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
+      }
+      const boxes = rleBoxesFromFlags(flags, N);
+      if (boxes.length) groups.push({ boxes, hex: c.hex });
+    });
+  } else {
+    darkIconNote.style.display = 'none';
+    const iconBoxes = rleBoxesFromFlags(state.mask, N); // mask is already 0/1
+    if (iconBoxes.length) groups.push({ boxes: iconBoxes, hex: '#ffffff' });
+  }
+
+  return { groups };
 }
 
 let rebuildTimer = null;
@@ -339,16 +404,12 @@ function rebuild() {
   state._colors = colors;
 
   if (capGroup) { scene.remove(capGroup); }
-  const { baseBoxes, iconBoxes, iconHex } = buildKeycap();
-  const baseGroup = instancedPreview(baseBoxes, BASE_COLOR);
-  const iconGroup = instancedPreview(iconBoxes, iconHex);
+  const { groups } = buildKeycap();
   capGroup = new THREE.Group();
-  capGroup.add(baseGroup, iconGroup);
+  groups.forEach(g => capGroup.add(instancedPreview(g.boxes, g.hex)));
   scene.add(capGroup);
 
-  state._baseBoxes = baseBoxes;
-  state._iconBoxes = iconBoxes;
-  state._iconHex = iconHex;
+  state._groups = groups;
 
   emptyState.style.display = 'none';
   viewerHint.style.display = 'block';
@@ -356,9 +417,9 @@ function rebuild() {
 }
 
 // ---------------------------------------------------------------
-// Multi-color 3MF export — one file, base + icon as two colored
-// objects, read natively by Bambu Studio (no manual per-object
-// filament assignment needed on your end).
+// Multi-color 3MF export — one file, base + up to 3 icon colors as
+// separate colored objects, read natively by Bambu Studio (no manual
+// per-object filament assignment needed on your end).
 // ---------------------------------------------------------------
 function meshGeoFromBoxes(boxes) {
   const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
@@ -385,26 +446,22 @@ function geometryToXml(geo) {
   return { vertices, triangles };
 }
 
-function build3MFModelXml(baseGeo, iconGeo) {
-  const baseXml = geometryToXml(baseGeo);
-  const iconXml = geometryToXml(iconGeo);
+function build3MFModelXml(groups) {
+  let resources = '';
+  let build = '';
+  groups.forEach((g, i) => {
+    const colorId = i * 2 + 1;
+    const objectId = i * 2 + 2;
+    const xml = geometryToXml(g.geo);
+    resources += `<m:colorgroup id="${colorId}"><m:color color="${g.hex}"/></m:colorgroup>`;
+    resources += `<object id="${objectId}" type="model" pid="${colorId}" pindex="0"><mesh><vertices>${xml.vertices}</vertices><triangles>${xml.triangles}</triangles></mesh></object>`;
+    build += `<item objectid="${objectId}"/>`;
+  });
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
-  <resources>
-    <m:colorgroup id="1"><m:color color="${BASE_COLOR}"/></m:colorgroup>
-    <m:colorgroup id="2"><m:color color="${state._iconHex || '#ffffff'}"/></m:colorgroup>
-    <object id="3" type="model" pid="1" pindex="0">
-      <mesh><vertices>${baseXml.vertices}</vertices><triangles>${baseXml.triangles}</triangles></mesh>
-    </object>
-    <object id="4" type="model" pid="2" pindex="0">
-      <mesh><vertices>${iconXml.vertices}</vertices><triangles>${iconXml.triangles}</triangles></mesh>
-    </object>
-  </resources>
-  <build>
-    <item objectid="3"/>
-    <item objectid="4"/>
-  </build>
+  <resources>${resources}</resources>
+  <build>${build}</build>
 </model>`;
 }
 
@@ -501,13 +558,10 @@ function buildZip(files) {
 }
 
 function export3MF() {
-  if (!state._baseBoxes || !state._baseBoxes.length) return;
-  const baseGeo = meshGeoFromBoxes(state._baseBoxes);
-  const iconGeo = state._iconBoxes.length
-    ? meshGeoFromBoxes(state._iconBoxes)
-    : meshGeoFromBoxes([boxDesc(0.01, 0.01, 0.01, 0, 0, 0)]);
+  if (!state._groups || !state._groups.length) return;
+  const groupsWithGeo = state._groups.map(g => ({ hex: g.hex, geo: meshGeoFromBoxes(g.boxes) }));
 
-  const modelXml = build3MFModelXml(baseGeo, iconGeo);
+  const modelXml = build3MFModelXml(groupsWithGeo);
   const blob = buildZip([
     { name: '[Content_Types].xml', data: CONTENT_TYPES_XML },
     { name: '_rels/.rels', data: RELS_XML },
