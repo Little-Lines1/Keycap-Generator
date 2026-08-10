@@ -1,36 +1,35 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /* ---------------------------------------------------------------
    Keycap Forge
-   Generates a flat G20-profile keycap (16.3 x 16.3 x 4.5mm) with
-   a two-color pixel-art icon fused into the top face, oriented
-   flat-side-down (Z=0) so it prints without supports.
+   Generates a flat G20-profile keycap (16.3 x 16.3 x 4.5mm) with a
+   two-color pixel-art icon fused into the top face, oriented flat-
+   side-down so it prints without supports. Exports one multi-color
+   3MF (base + icon as separate colored objects) that Bambu Studio
+   reads natively — no manual per-object filament assignment needed.
    --------------------------------------------------------------- */
 
-// ---- Fixed physical spec (Stream Deck-style flat keycap) ----
-const CAP = 16.3;              // footprint, mm
-const TOTAL_H = 4.5;           // total keycap height, mm
-const PIXEL_H = 0.8;           // thickness of the icon/top pixel layer, mm
-const SOCKET_MARGIN = 0.2;     // solid material kept above the pixel layer, mm
-const CROSS_LEN = 4.0;         // MX stem cross overall span, mm
-const CROSS_W = 1.3;           // MX stem cross blade width, mm
-const WALL_INSET = 0.15;       // tiny inset so pixel layer + body don't z-fight visually
+const CAP = 16.3;
+const TOTAL_H = 4.5;
+const PIXEL_H = 0.8;
+const SOCKET_MARGIN = 0.2;
+const CROSS_LEN = 4.0;
+const CROSS_W = 1.3;
+const BASE_COLOR = '#000000'; // keycap body is always black, by design
 
-// ---- State ----
 const state = {
   img: null,
   scalePct: 70,
-  resolution: 64,
-  mode: 'bw',
-  baseColor: '#111214',
-  iconColor: '#e9e8e4',
-  mask: null,       // Uint8Array, 1 = icon pixel
+  resolution: 400,
+  mode: 'color',      // 'color' = keep the upload's own colors, 'bw' = white icon
+  iconColor: '#ffffff',
+  mask: null,
+  _colors: null,
+  _iconHex: '#ffffff',
 };
 
-// ---- DOM ----
 const dropzone = document.getElementById('dropzone');
 const dzTitle = document.getElementById('dz-title');
 const fileInput = document.getElementById('file-input');
@@ -39,18 +38,10 @@ const scaleVal = document.getElementById('scale-val');
 const resSlider = document.getElementById('resolution');
 const resVal = document.getElementById('res-val');
 const seg = document.querySelectorAll('.seg button');
-const colorBase = document.getElementById('color-base');
-const colorIcon = document.getElementById('color-icon');
-const fillBase = document.getElementById('fill-base');
-const fillIcon = document.getElementById('fill-icon');
-const dlIconBtn = document.getElementById('dl-icon');
-const dlBaseBtn = document.getElementById('dl-base');
-const dlPresetBtn = document.getElementById('dl-preset');
-const uploadError = document.getElementById('upload-error');
+const dl3mfBtn = document.getElementById('dl-3mf');
 const emptyState = document.getElementById('empty-state');
 const viewerHint = document.getElementById('viewer-hint');
 
-// ---- Three.js setup ----
 const wrap = document.getElementById('canvas-wrap');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 500);
@@ -75,7 +66,7 @@ const rim = new THREE.DirectionalLight(0x5eead4, 0.35);
 rim.position.set(-20, -10, -15);
 scene.add(rim);
 
-let capGroup = null; // holds current preview meshes
+let capGroup = null;
 
 function resize() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
@@ -94,7 +85,8 @@ function animate() {
 animate();
 
 // ---------------------------------------------------------------
-// Image handling
+// Image handling — SVG only, any aspect ratio (auto-centered/padded
+// into a square, so nothing needs to be pre-cropped by hand).
 // ---------------------------------------------------------------
 function showDzError(msg) {
   dzTitle.textContent = msg;
@@ -102,20 +94,11 @@ function showDzError(msg) {
   dropzone.classList.add('error');
 }
 
-// SVG is scale-free, so grid detail is always fixed at maximum (64) —
-// see openFile() below. No auto-detection needed for a vector source.
-
 function openFile(file) {
   if (!file) return;
   const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg');
+  if (!isSvg) { showDzError('Only .svg files are supported'); return; }
 
-  if (!isSvg) {
-    showDzError('Only .svg files are supported');
-    return;
-  }
-
-  // SVG path — parse as text first so we can check the declared
-  // viewBox/width/height before ever rasterizing it.
   const textReader = new FileReader();
   textReader.onload = (e) => {
     const svgText = e.target.result;
@@ -125,30 +108,10 @@ function openFile(file) {
       showDzError('Could not read this SVG'); return;
     }
 
-    let w, h;
-    const vb = svgEl.getAttribute('viewBox');
-    if (vb) {
-      const parts = vb.trim().split(/[\s,]+/).map(Number);
-      w = parts[2]; h = parts[3];
-    } else {
-      w = parseFloat(svgEl.getAttribute('width'));
-      h = parseFloat(svgEl.getAttribute('height'));
-    }
-    if (!w || !h || Math.abs(w / h - 1) > 0.05) {
-      showDzError('SVG must be square (1:1)'); return;
-    }
-
     const blob = new Blob([svgText], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => {
-      // SVG is vector/scale-free — always sample at max grid detail,
-      // regardless of whatever the rasterized img.naturalWidth reports
-      // (that reflects the viewBox's own coordinate units, not real
-      // resolution, and would otherwise wrongly tank the detail level).
-      state.resolution = 64;
-      resSlider.value = 64;
-      resVal.textContent = '64 × 64';
       state.img = img;
       dzTitle.textContent = file.name;
       dropzone.classList.remove('error');
@@ -187,11 +150,11 @@ seg.forEach(btn => btn.addEventListener('click', () => {
   state.mode = btn.dataset.mode;
   rebuild();
 }));
-colorBase.addEventListener('input', () => { state.baseColor = colorBase.value; fillBase.style.background = state.baseColor; rebuild(); });
-colorIcon.addEventListener('input', () => { state.iconColor = colorIcon.value; fillIcon.style.background = state.iconColor; rebuild(); });
 
 // ---------------------------------------------------------------
-// Sample the uploaded image into an N x N icon/base pixel mask
+// Sample the uploaded image into an N x N icon/base pixel mask.
+// Non-square sources are fit ("contain") and centered on both axes
+// instead of being stretched or rejected.
 // ---------------------------------------------------------------
 function sampleImageToMask(img, N, scalePct) {
   const off = document.createElement('canvas');
@@ -199,22 +162,25 @@ function sampleImageToMask(img, N, scalePct) {
   const ctx = off.getContext('2d', { willReadFrequently: true });
   ctx.clearRect(0, 0, N, N);
 
-  // draw the icon centered, scaled to scalePct of the grid
-  const scale = scalePct / 100;
-  const drawSize = N * scale;
-  const offset = (N - drawSize) / 2;
-  ctx.drawImage(img, offset, offset, drawSize, drawSize);
+  const srcW = img.naturalWidth || img.width || 1;
+  const srcH = img.naturalHeight || img.height || 1;
+  const targetBox = N * (scalePct / 100);
+  const fitScale = Math.min(targetBox / srcW, targetBox / srcH);
+  const drawW = srcW * fitScale;
+  const drawH = srcH * fitScale;
+  const offsetX = (N - drawW) / 2;
+  const offsetY = (N - drawH) / 2;
+  ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
 
   const data = ctx.getImageData(0, 0, N, N).data;
 
-  // detect if the image actually carries useful alpha info
   let hasAlpha = false;
   for (let i = 3; i < data.length; i += 4) {
     if (data[i] < 250) { hasAlpha = true; break; }
   }
 
   const mask = new Uint8Array(N * N);
-  const colors = []; // sampled rgb per icon pixel, for "uploaded colors" mode
+  const colors = [];
 
   if (hasAlpha) {
     for (let p = 0; p < N * N; p++) {
@@ -223,8 +189,6 @@ function sampleImageToMask(img, N, scalePct) {
       colors.push([data[p * 4], data[p * 4 + 1], data[p * 4 + 2]]);
     }
   } else {
-    // no usable alpha: treat the four corners as "background" and
-    // flag pixels that differ a lot from it as the icon
     const corners = [0, N - 1, (N - 1) * N, N * N - 1];
     let br = 0, bg = 0, bb = 0;
     corners.forEach(c => { br += data[c * 4]; bg += data[c * 4 + 1]; bb += data[c * 4 + 2]; });
@@ -246,30 +210,46 @@ function averageColor(colors, mask, want) {
   for (let i = 0; i < mask.length; i++) {
     if (mask[i] === want) { r += colors[i][0]; g += colors[i][1]; b += colors[i][2]; n++; }
   }
-  if (!n) return want ? '#e9e8e4' : '#111214';
+  if (!n) return '#ffffff';
   const toHex = v => Math.round(v).toString(16).padStart(2, '0');
   return `#${toHex(r / n)}${toHex(g / n)}${toHex(b / n)}`;
 }
 
 // ---------------------------------------------------------------
-// Box helper: returns a BufferGeometry translated to CENTER coordinates
-// (mm) — only used at export time now (see exportMeshFromBoxes below).
+// Geometry builders
+// ---------------------------------------------------------------
 function boxGeom(sx, sy, sz, cx, cy, cz) {
   const geo = new THREE.BoxGeometry(sx, sy, sz);
   geo.translate(cx, cy, cz);
   return geo;
 }
-
-// Box descriptor: cheap {sx,sy,sz,cx,cy,cz} object (mm) — cheap to
-// generate by the thousands. Real geometry is only built from these
-// where it's actually needed (instanced preview, or STL export).
 function boxDesc(sx, sy, sz, cx, cy, cz) {
   return { sx, sy, sz, cx, cy, cz };
 }
 
-// One shared unit cube, reused (scaled per-instance) for every pixel in
-// the live preview — this is what makes high detail levels fast: no new
-// geometry is allocated per pixel, just a transform matrix.
+// Run-length-encode each row of the mask into horizontal spans instead
+// of one box per pixel — at ~400x400 that's the difference between a
+// handful of wide strips and 160,000 individual boxes. Keeps both the
+// live preview and the exported file light regardless of detail level.
+function rleBoxesFromMask(mask, N, want) {
+  const cell = CAP / N;
+  const half = CAP / 2;
+  const boxes = [];
+  for (let row = 0; row < N; row++) {
+    let col = 0;
+    while (col < N) {
+      if (mask[row * N + col] !== want) { col++; continue; }
+      const start = col;
+      while (col < N && mask[row * N + col] === want) col++;
+      const runLen = col - start;
+      const cx = -half + cell * (start + runLen / 2);
+      const cz = -half + cell * (row + 0.5);
+      boxes.push(boxDesc(cell * runLen + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz));
+    }
+  }
+  return boxes;
+}
+
 const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
 
 function instancedPreview(boxes, color) {
@@ -288,20 +268,10 @@ function instancedPreview(boxes, color) {
   return group;
 }
 
-// Turns box descriptors into ONE real, mergeable mesh — only called at
-// STL export time (a rare, one-off action), never during live preview.
-function exportMeshFromBoxes(boxes) {
-  const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
-  const merged = mergeGeometries(geoms, false);
-  return new THREE.Mesh(merged, new THREE.MeshStandardMaterial());
-}
-
-// Builds the solid body (Y from yBottom..yTop) around a centered
-// cross-shaped cavity, as 8 non-overlapping boxes (no CSG needed).
 function crossFrameBoxes(yBottom, yTop) {
   const half = CAP / 2;
-  const armHalfLen = CROSS_LEN / 2;   // how far each blade extends from center
-  const armHalfW = CROSS_W / 2;       // blade half-thickness
+  const armHalfLen = CROSS_LEN / 2;
+  const armHalfW = CROSS_W / 2;
   const h = yTop - yBottom;
   const cy = (yTop + yBottom) / 2;
   const b = [];
@@ -324,41 +294,22 @@ function crossFrameBoxes(yBottom, yTop) {
 }
 
 function buildKeycap() {
-  if (!state.mask) {
-    return { baseBoxes: [], iconBoxes: [], baseHex: state.baseColor, iconHex: state.iconColor };
-  }
+  if (!state.mask) return { baseBoxes: [], iconBoxes: [], iconHex: state.iconColor };
 
   const N = state.resolution;
-  const cell = CAP / N;
-  const half = CAP / 2;
-
-  let baseHex = state.baseColor, iconHex = state.iconColor;
+  let iconHex = '#ffffff';
   if (state.mode === 'color' && state._colors) {
-    baseHex = averageColor(state._colors, state.mask, 0);
     iconHex = averageColor(state._colors, state.mask, 1);
-    fillBase.style.background = baseHex;
-    fillIcon.style.background = iconHex;
   }
 
-  const baseBoxes = [];
-  const iconBoxes = [];
-
-  for (let row = 0; row < N; row++) {
-    for (let col = 0; col < N; col++) {
-      const idx = row * N + col;
-      const isIcon = state.mask[idx] === 1;
-      const cx = -half + cell * (col + 0.5);
-      const cz = -half + cell * (row + 0.5);
-      const d = boxDesc(cell + 0.02, PIXEL_H, cell + 0.02, cx, PIXEL_H / 2, cz);
-      (isIcon ? iconBoxes : baseBoxes).push(d);
-    }
-  }
+  const baseBoxes = rleBoxesFromMask(state.mask, N, 0);
+  const iconBoxes = rleBoxesFromMask(state.mask, N, 1);
 
   const capFloorTop = PIXEL_H + SOCKET_MARGIN;
   baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, PIXEL_H + SOCKET_MARGIN / 2, 0));
   baseBoxes.push(...crossFrameBoxes(capFloorTop, TOTAL_H));
 
-  return { baseBoxes, iconBoxes, baseHex, iconHex };
+  return { baseBoxes, iconBoxes, iconHex };
 }
 
 let rebuildTimer = null;
@@ -375,91 +326,186 @@ function rebuild() {
   state._colors = colors;
 
   if (capGroup) { scene.remove(capGroup); }
-  const { baseBoxes, iconBoxes, baseHex, iconHex } = buildKeycap();
-  const baseGroup = instancedPreview(baseBoxes, baseHex);
+  const { baseBoxes, iconBoxes, iconHex } = buildKeycap();
+  const baseGroup = instancedPreview(baseBoxes, BASE_COLOR);
   const iconGroup = instancedPreview(iconBoxes, iconHex);
   capGroup = new THREE.Group();
   capGroup.add(baseGroup, iconGroup);
-  // The icon layer sits at local Y=0..0.8, the stem socket opening at
-  // the top (Y≈4.5). Flip 180° so the ICON faces the camera by default
-  // instead of the stem-socket cavity (that cross-shaped "dent" you saw).
-  // Don't rotate the model to reveal the icon face — flipping a flat
-  // panel 180° about an in-plane axis mirrors whatever's printed on it.
-  // Instead the camera itself sits below, looking up at the icon
-  // (Y=0 face), matching the actual printed-face-down orientation
-  // without ever touching the geometry.
-  capGroup.rotation.x = 0;
   scene.add(capGroup);
 
   state._baseBoxes = baseBoxes;
   state._iconBoxes = iconBoxes;
+  state._iconHex = iconHex;
 
   emptyState.style.display = 'none';
   viewerHint.style.display = 'block';
-  dlIconBtn.disabled = false;
-  dlBaseBtn.disabled = false;
-  dlPresetBtn.disabled = false;
+  dl3mfBtn.disabled = false;
 }
 
 // ---------------------------------------------------------------
-// STL export
-// Model is authored with Y-up, flat face at Y=0. For a standard
-// STL/printer convention (Z-up, flat face on the bed at Z=0), we
-// rotate -90° about X on export only, so downloaded files already
-// sit flat-side-down with no reorientation needed in the slicer.
+// Multi-color 3MF export — one file, base + icon as two colored
+// objects, read natively by Bambu Studio (no manual per-object
+// filament assignment needed on your end).
 // ---------------------------------------------------------------
-function exportBoxes(boxes, filename) {
-  const mesh = exportMeshFromBoxes(boxes);
-  const exportScene = new THREE.Group();
-  exportScene.add(mesh);
-  exportScene.rotation.x = Math.PI / 2;
-  exportScene.updateMatrixWorld(true);
-
-  const exporter = new STLExporter();
-  const stlString = exporter.parse(exportScene, { binary: false });
-  const blob = new Blob([stlString], { type: 'model/stl' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+function meshGeoFromBoxes(boxes) {
+  const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
+  return mergeGeometries(geoms, false);
 }
 
-dlBaseBtn.addEventListener('click', () => {
+// local (Y-up, flat face at y=0) -> print (Z-up, flat face at z=0)
+function toPrintSpace(px, py, pz) {
+  return [px, -pz, py];
+}
+
+function geometryToXml(geo) {
+  const pos = geo.attributes.position;
+  const idx = geo.index;
+  let vertices = '';
+  for (let i = 0; i < pos.count; i++) {
+    const [x, y, z] = toPrintSpace(pos.getX(i), pos.getY(i), pos.getZ(i));
+    vertices += `<vertex x="${x.toFixed(4)}" y="${y.toFixed(4)}" z="${z.toFixed(4)}"/>`;
+  }
+  let triangles = '';
+  for (let i = 0; i < idx.count; i += 3) {
+    triangles += `<triangle v1="${idx.getX(i)}" v2="${idx.getX(i + 1)}" v3="${idx.getX(i + 2)}"/>`;
+  }
+  return { vertices, triangles };
+}
+
+function build3MFModelXml(baseGeo, iconGeo) {
+  const baseXml = geometryToXml(baseGeo);
+  const iconXml = geometryToXml(iconGeo);
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+  <resources>
+    <m:colorgroup id="1"><m:color color="${BASE_COLOR}"/></m:colorgroup>
+    <m:colorgroup id="2"><m:color color="${state._iconHex || '#ffffff'}"/></m:colorgroup>
+    <object id="3" type="model" pid="1" pindex="0">
+      <mesh><vertices>${baseXml.vertices}</vertices><triangles>${baseXml.triangles}</triangles></mesh>
+    </object>
+    <object id="4" type="model" pid="2" pindex="0">
+      <mesh><vertices>${iconXml.vertices}</vertices><triangles>${iconXml.triangles}</triangles></mesh>
+    </object>
+  </resources>
+  <build>
+    <item objectid="3"/>
+    <item objectid="4"/>
+  </build>
+</model>`;
+}
+
+const CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>`;
+
+const RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`;
+
+// ---- Minimal uncompressed (STORE) ZIP writer ----
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function buildZip(files) {
+  const encoder = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+
+  files.forEach(({ name, data }) => {
+    const nameBytes = encoder.encode(name);
+    const bytes = typeof data === 'string' ? encoder.encode(data) : data;
+    const crc = crc32(bytes);
+
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0, true);
+    local.setUint16(8, 0, true);
+    local.setUint16(10, 0, true);
+    local.setUint16(12, 0x21, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, bytes.length, true);
+    local.setUint32(22, bytes.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);
+    chunks.push(new Uint8Array(local.buffer), nameBytes, bytes);
+
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true);
+    cd.setUint16(4, 20, true);
+    cd.setUint16(6, 20, true);
+    cd.setUint16(8, 0, true);
+    cd.setUint16(10, 0, true);
+    cd.setUint16(12, 0, true);
+    cd.setUint16(14, 0x21, true);
+    cd.setUint32(16, crc, true);
+    cd.setUint32(20, bytes.length, true);
+    cd.setUint32(24, bytes.length, true);
+    cd.setUint16(28, nameBytes.length, true);
+    cd.setUint16(30, 0, true);
+    cd.setUint16(32, 0, true);
+    cd.setUint16(34, 0, true);
+    cd.setUint16(36, 0, true);
+    cd.setUint32(38, 0, true);
+    cd.setUint32(42, offset, true);
+    central.push(new Uint8Array(cd.buffer), nameBytes);
+
+    offset += 30 + nameBytes.length + bytes.length;
+  });
+
+  const centralStart = offset;
+  let centralSize = 0;
+  central.forEach(c => centralSize += c.length);
+
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true);
+  end.setUint16(4, 0, true);
+  end.setUint16(6, 0, true);
+  end.setUint16(8, files.length, true);
+  end.setUint16(10, files.length, true);
+  end.setUint32(12, centralSize, true);
+  end.setUint32(16, centralStart, true);
+  end.setUint16(20, 0, true);
+
+  return new Blob([...chunks, ...central, new Uint8Array(end.buffer)], { type: 'application/octet-stream' });
+}
+
+function export3MF() {
   if (!state._baseBoxes || !state._baseBoxes.length) return;
-  exportBoxes(state._baseBoxes, 'keycap-base.stl');
-});
-dlIconBtn.addEventListener('click', () => {
-  if (!state._iconBoxes || !state._iconBoxes.length) return;
-  exportBoxes(state._iconBoxes, 'keycap-icon.stl');
-});
+  const baseGeo = meshGeoFromBoxes(state._baseBoxes);
+  const iconGeo = state._iconBoxes.length
+    ? meshGeoFromBoxes(state._iconBoxes)
+    : meshGeoFromBoxes([boxDesc(0.01, 0.01, 0.01, 0, 0, 0)]);
 
-// ---------------------------------------------------------------
-// Bambu Studio process preset — low infill, few walls, small part
-// defaults, so both STLs slice fast and light on filament.
-// Import in Bambu Studio via: Process settings → the wrench icon →
-// Import preset, then select this file.
-// ---------------------------------------------------------------
-function buildPresetJSON() {
-  return {
-    name: "Keycap Forge - low material",
-    inherits: "0.20mm Standard @BBL X1C",
-    layer_height: "0.2",
-    wall_loops: "2",
-    sparse_infill_density: "8%",
-    sparse_infill_pattern: "grid",
-    top_shell_layers: "3",
-    bottom_shell_layers: "2",
-    ironing_type: "no ironing",
-    from: "User"
-  };
-}
+  const modelXml = build3MFModelXml(baseGeo, iconGeo);
+  const blob = buildZip([
+    { name: '[Content_Types].xml', data: CONTENT_TYPES_XML },
+    { name: '_rels/.rels', data: RELS_XML },
+    { name: '3D/3dmodel.model', data: modelXml },
+  ]);
 
-dlPresetBtn.addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(buildPresetJSON(), null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'keycap-print-settings.json';
+  a.href = url; a.download = 'keycap.3mf';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
-});
+}
+
+dl3mfBtn.addEventListener('click', export3MF);
