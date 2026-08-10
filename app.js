@@ -38,6 +38,7 @@ const scaleVal = document.getElementById('scale-val');
 const resSlider = document.getElementById('resolution');
 const resVal = document.getElementById('res-val');
 const seg = document.querySelectorAll('.seg button');
+const darkIconNote = document.getElementById('dark-icon-note');
 const dl3mfBtn = document.getElementById('dl-3mf');
 const emptyState = document.getElementById('empty-state');
 const viewerHint = document.getElementById('viewer-hint');
@@ -293,14 +294,26 @@ function crossFrameBoxes(yBottom, yTop) {
   return b;
 }
 
+function hexLuminance(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 function buildKeycap() {
   if (!state.mask) return { baseBoxes: [], iconBoxes: [], iconHex: state.iconColor };
 
   const N = state.resolution;
   let iconHex = '#ffffff';
+  let wasTooDark = false;
   if (state.mode === 'color' && state._colors) {
     iconHex = averageColor(state._colors, state.mask, 1);
+    // The keycap body is always black — a near-black icon on it would
+    // be invisible, so fall back to white automatically in that case.
+    if (hexLuminance(iconHex) < 45) { iconHex = '#ffffff'; wasTooDark = true; }
   }
+  darkIconNote.style.display = wasTooDark ? 'block' : 'none';
 
   const baseBoxes = rleBoxesFromMask(state.mask, N, 0);
   const iconBoxes = rleBoxesFromMask(state.mask, N, 1);
