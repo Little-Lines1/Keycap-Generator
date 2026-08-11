@@ -232,7 +232,7 @@ function rgbToHex(r, g, b) {
 // out as several distinct print colors instead of being flattened into
 // one averaged blob. Returns up to K non-empty clusters as
 // { hex, assign(pixelIndex) } — clusters with no pixels are dropped.
-function clusterIconColors(colors, mask, K) {
+function clusterIconColors(colors, mask, K, N) {
   const idxs = [];
   for (let i = 0; i < mask.length; i++) if (mask[i] === 1) idxs.push(i);
   if (!idxs.length) return [];
@@ -264,6 +264,33 @@ function clusterIconColors(colors, mask, K) {
       s[0] += colors[i][0]; s[1] += colors[i][1]; s[2] += colors[i][2]; s[3]++;
     }
     centroids = sums.map((s, c) => s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : centroids[c]);
+  }
+
+  // A smooth gradient (e.g. Instagram's purple-to-orange) produces
+  // noisy, speckled per-pixel cluster assignment right at the color
+  // boundaries — technically correct, but it shreds that color region
+  // into hundreds of single-pixel islands once turned into boxes. A
+  // couple of majority-vote passes over each pixel's neighbors cleans
+  // that speckling up before any geometry gets built from it.
+  for (let pass = 0; pass < 2; pass++) {
+    const next = assignment.slice();
+    for (const i of idxs) {
+      const row = Math.floor(i / N), col = i % N;
+      const counts = new Array(k).fill(0);
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const r = row + dr, c = col + dc;
+          if (r < 0 || r >= N || c < 0 || c >= N) continue;
+          const ni = r * N + c;
+          if (mask[ni] !== 1) continue;
+          counts[assignment[ni]]++;
+        }
+      }
+      let best = assignment[i], bestCount = -1;
+      for (let c = 0; c < k; c++) if (counts[c] > bestCount) { bestCount = counts[c]; best = c; }
+      next[i] = best;
+    }
+    assignment = next;
   }
 
   const clusters = [];
@@ -406,7 +433,7 @@ function buildKeycap() {
   groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
   if (state.mode === 'color' && state._colors) {
-    const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3);
+    const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3, N);
     darkIconNote.style.display = clusters.some(c => c.hex === '#ffffff') ? 'block' : 'none';
     clusters.forEach(c => {
       const flags = new Uint8Array(state.mask.length);
