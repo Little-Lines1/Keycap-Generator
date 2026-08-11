@@ -390,25 +390,20 @@ function buildKeycap() {
   const marginCenterY = socketTop + SOCKET_MARGIN / 2;
 
   // Base color fills straight through from the socket top to the very
-  // top face (no separate uniform "margin slab" anymore) — one fewer
-  // seam for every base pixel, since it's now a single box in Y.
+  // top face (no separate uniform "margin slab") — one fewer seam for
+  // every base pixel, since it's now a single box in Y.
   const baseFlags = new Uint8Array(state.mask.length);
   for (let i = 0; i < state.mask.length; i++) baseFlags[i] = state.mask[i] === 0 ? 1 : 0;
   const baseBoxes = rleBoxesFromFlags(baseFlags, N, socketTop + (TOTAL_H - socketTop) / 2, TOTAL_H - socketTop);
   baseBoxes.push(...crossFrameBoxes(0, socketTop));
-  groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
-  // Icon pixels only need their OWN color for the thin top layer; the
-  // margin strip underneath each one is backed in base color, matching
-  // that same pixel footprint exactly (instead of one big slab meeting
-  // many small fragments — that mismatch was the biggest remaining
-  // source of "open edge" warnings).
-  function addIconGroup(flags, hex) {
-    const boxes = rleBoxesFromFlags(flags, N, pixelCenterY, PIXEL_H);
-    if (!boxes.length) return;
-    groups.push({ boxes, hex });
-    baseBoxes.push(...rleBoxesFromFlags(flags, N, marginCenterY, SOCKET_MARGIN));
-  }
+  // The margin backing under the icon is decomposed ONCE from the
+  // icon's overall footprint (all colors combined), not once per
+  // color cluster — a gradient logo can split into several scattered
+  // color regions, and backing each of those separately fragmented
+  // the base object badly. One shared backing avoids that entirely.
+  baseBoxes.push(...rleBoxesFromFlags(state.mask, N, marginCenterY, SOCKET_MARGIN));
+  groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
   if (state.mode === 'color' && state._colors) {
     const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3);
@@ -418,11 +413,13 @@ function buildKeycap() {
       for (let i = 0; i < state.mask.length; i++) {
         flags[i] = (state.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
       }
-      addIconGroup(flags, c.hex);
+      const boxes = rleBoxesFromFlags(flags, N, pixelCenterY, PIXEL_H);
+      if (boxes.length) groups.push({ boxes, hex: c.hex });
     });
   } else {
     darkIconNote.style.display = 'none';
-    addIconGroup(state.mask, '#ffffff'); // mask is already 0/1
+    const boxes = rleBoxesFromFlags(state.mask, N, pixelCenterY, PIXEL_H); // mask is already 0/1
+    if (boxes.length) groups.push({ boxes, hex: '#ffffff' });
   }
 
   return { groups };
