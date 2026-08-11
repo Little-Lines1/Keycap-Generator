@@ -294,57 +294,43 @@ function boxDesc(sx, sy, sz, cx, cy, cz) {
 // difference between a handful of wide strips and 160,000 individual
 // boxes. Keeps both the live preview and the exported file light
 // regardless of detail level or how many color groups there are.
-function rleBoxesFromFlags(flags, N, layerCenterY) {
-  const cell = CAP / N;
-  const half = CAP / 2;
-  const boxes = [];
+// Greedy 2D rectangle decomposition: for each still-unclaimed pixel,
+// grow a rectangle right as far as it can, then down as far as that
+// whole width stays set, then mark it claimed and move on. This turns
+// a solid region into a handful of boxes instead of one-per-row, which
+// is what keeps the "open edge" count low without the user ever
+// needing to hit Repair in Bambu Studio.
+function greedyRectangles(flags, N) {
+  const claimed = new Uint8Array(N * N);
+  const rects = [];
   for (let row = 0; row < N; row++) {
-    let col = 0;
-    while (col < N) {
-      if (!flags[row * N + col]) { col++; continue; }
-      const start = col;
-      while (col < N && flags[row * N + col]) col++;
-      const runLen = col - start;
-      const cx = -half + cell * (start + runLen / 2);
-      const cz = -half + cell * (row + 0.5);
-      boxes.push(boxDesc(cell * runLen, PIXEL_H, cell, cx, layerCenterY, cz));
+    for (let col = 0; col < N; col++) {
+      const idx = row * N + col;
+      if (!flags[idx] || claimed[idx]) continue;
+      let colEnd = col;
+      while (colEnd + 1 < N && flags[row * N + colEnd + 1] && !claimed[row * N + colEnd + 1]) colEnd++;
+      let rowEnd = row;
+      outer: while (rowEnd + 1 < N) {
+        for (let c = col; c <= colEnd; c++) {
+          if (!flags[(rowEnd + 1) * N + c] || claimed[(rowEnd + 1) * N + c]) break outer;
+        }
+        rowEnd++;
+      }
+      for (let r = row; r <= rowEnd; r++) for (let c = col; c <= colEnd; c++) claimed[r * N + c] = 1;
+      rects.push({ row, col, rowSpan: rowEnd - row + 1, colSpan: colEnd - col + 1 });
     }
   }
-  return mergeVerticalRuns(boxes, cell);
+  return rects;
 }
 
-// Second pass: after row-based merging, stack boxes that share the
-// exact same X-span across consecutive rows into one taller box.
-// Between this and the row merge, a solid rectangular region of the
-// icon collapses to a handful of boxes instead of hundreds — far
-// fewer touching faces, so far fewer "open edge" artifacts once the
-// final mesh gets welded (no manual repair needed on the user's end).
-function mergeVerticalRuns(boxes, cell) {
-  const groups = new Map();
-  boxes.forEach(b => {
-    const key = `${b.cx.toFixed(5)}_${b.sx.toFixed(5)}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(b);
+function rleBoxesFromFlags(flags, N, layerCenterY, layerHeight) {
+  const cell = CAP / N;
+  const half = CAP / 2;
+  return greedyRectangles(flags, N).map(r => {
+    const cx = -half + cell * (r.col + r.colSpan / 2);
+    const cz = -half + cell * (r.row + r.rowSpan / 2);
+    return boxDesc(cell * r.colSpan, layerHeight, cell * r.rowSpan, cx, layerCenterY, cz);
   });
-
-  const merged = [];
-  groups.forEach(list => {
-    list.sort((a, b) => a.cz - b.cz);
-    let cur = null;
-    for (const b of list) {
-      if (cur && Math.abs((cur.cz + cur.sz / 2) - (b.cz - b.sz / 2)) < cell * 1e-3) {
-        const newBottom = cur.cz - cur.sz / 2;
-        const newTop = b.cz + b.sz / 2;
-        cur.sz = newTop - newBottom;
-        cur.cz = (newTop + newBottom) / 2;
-      } else {
-        if (cur) merged.push(cur);
-        cur = { ...b };
-      }
-    }
-    if (cur) merged.push(cur);
-  });
-  return merged;
 }
 
 const UNIT_BOX = new THREE.BoxGeometry(1, 1, 1);
@@ -396,19 +382,33 @@ function buildKeycap() {
   const N = state.resolution;
   const groups = [];
 
-  // Icon/pixel layer now sits at the TOP of the local model (Y near
+  // Icon/pixel layer sits at the TOP of the local model (Y near
   // TOTAL_H) with the socket body underneath — so a plain camera above
-  // the model shows the icon directly, no flip/rotate trick needed to
-  // "reveal" it (that trick is exactly what was mirroring it before).
+  // the model shows the icon directly, no flip/rotate trick needed.
   const pixelCenterY = TOTAL_H - PIXEL_H / 2;
   const socketTop = TOTAL_H - PIXEL_H - SOCKET_MARGIN;
+  const marginCenterY = socketTop + SOCKET_MARGIN / 2;
 
+  // Base color fills straight through from the socket top to the very
+  // top face (no separate uniform "margin slab" anymore) — one fewer
+  // seam for every base pixel, since it's now a single box in Y.
   const baseFlags = new Uint8Array(state.mask.length);
   for (let i = 0; i < state.mask.length; i++) baseFlags[i] = state.mask[i] === 0 ? 1 : 0;
-  const baseBoxes = rleBoxesFromFlags(baseFlags, N, pixelCenterY);
-  baseBoxes.push(boxDesc(CAP, SOCKET_MARGIN, CAP, 0, socketTop + SOCKET_MARGIN / 2, 0));
+  const baseBoxes = rleBoxesFromFlags(baseFlags, N, socketTop + (TOTAL_H - socketTop) / 2, TOTAL_H - socketTop);
   baseBoxes.push(...crossFrameBoxes(0, socketTop));
   groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
+
+  // Icon pixels only need their OWN color for the thin top layer; the
+  // margin strip underneath each one is backed in base color, matching
+  // that same pixel footprint exactly (instead of one big slab meeting
+  // many small fragments — that mismatch was the biggest remaining
+  // source of "open edge" warnings).
+  function addIconGroup(flags, hex) {
+    const boxes = rleBoxesFromFlags(flags, N, pixelCenterY, PIXEL_H);
+    if (!boxes.length) return;
+    groups.push({ boxes, hex });
+    baseBoxes.push(...rleBoxesFromFlags(flags, N, marginCenterY, SOCKET_MARGIN));
+  }
 
   if (state.mode === 'color' && state._colors) {
     const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3);
@@ -418,13 +418,11 @@ function buildKeycap() {
       for (let i = 0; i < state.mask.length; i++) {
         flags[i] = (state.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
       }
-      const boxes = rleBoxesFromFlags(flags, N, pixelCenterY);
-      if (boxes.length) groups.push({ boxes, hex: c.hex });
+      addIconGroup(flags, c.hex);
     });
   } else {
     darkIconNote.style.display = 'none';
-    const iconBoxes = rleBoxesFromFlags(state.mask, N, pixelCenterY); // mask is already 0/1
-    if (iconBoxes.length) groups.push({ boxes: iconBoxes, hex: '#ffffff' });
+    addIconGroup(state.mask, '#ffffff'); // mask is already 0/1
   }
 
   return { groups };
