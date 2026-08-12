@@ -94,6 +94,28 @@
   .dropzone.has-image .dz-title { color: var(--accent); }
   input[type="file"] { display: none; }
 
+  .job-list {
+    flex-direction: column; gap: 6px; margin-top: 14px;
+    max-height: 220px; overflow-y: auto;
+  }
+  .job-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel-2); cursor: pointer; transition: all .12s ease;
+  }
+  .job-row:hover { border-color: var(--accent); }
+  .job-row.active { border-color: var(--accent); background: #1a2b28; }
+  .job-name {
+    font-size: 12.5px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; flex: 1; margin-right: 8px;
+  }
+  .job-row.active .job-name { color: var(--accent); }
+  .job-remove {
+    background: none; border: none; color: var(--muted); font-size: 16px;
+    line-height: 1; cursor: pointer; padding: 0 2px; flex-shrink: 0;
+  }
+  .job-remove:hover { color: var(--danger); }
+
   input[type="range"] {
     -webkit-appearance: none; width: 100%; height: 3px;
     background: var(--line); border-radius: 2px; outline: none;
@@ -222,14 +244,17 @@
       <label>Icon</label>
       <div class="dropzone" id="dropzone">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0-12 4 4m-4-4-4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-        <div class="dz-title" id="dz-title">Drop image or click to upload</div>
+        <div class="dz-title" id="dz-title">Drop up to 15 icons, or click to upload</div>
         <div class="dz-sub">.svg only · any shape, auto-centered</div>
       </div>
-      <input type="file" id="file-input" accept=".svg,image/svg+xml">
+      <input type="file" id="file-input" accept=".svg,image/svg+xml" multiple>
       <p class="note" id="upload-error" style="color:var(--danger);display:none;margin-top:10px"></p>
       <p class="note">Need an SVG? <strong>Little Lines</strong> recommends <a href="https://worldvectorlogo.com" target="_blank" rel="noopener" style="color:var(--accent)">worldvectorlogo.com</a> or <a href="https://seeklogo.com" target="_blank" rel="noopener" style="color:var(--accent)">seeklogo.com</a>.</p>
     </div>
 
+    <div class="job-list" id="job-list" style="display:none"></div>
+
+    <div id="settings-panel" style="display:none">
     <div class="field">
       <label>Icon size <span class="val" id="scale-val">70%</span></label>
       <input type="range" id="scale" min="30" max="95" value="70">
@@ -248,6 +273,7 @@
       </div>
       <p class="note" id="dark-icon-note" style="display:none;color:var(--accent)">This icon was too dark to see on the black keycap — switched to white automatically.</p>
     </div>
+    </div>
 
     <hr class="div">
 
@@ -261,9 +287,10 @@
     </div>
 
     <div class="actions">
-      <button class="btn primary" id="dl-3mf" disabled>Download keycap.3mf (multi-color)</button>
+      <button class="btn primary" id="dl-3mf" disabled>Download selected (.3mf)</button>
+      <button class="btn" id="dl-all" disabled>Download all (.3mf each)</button>
     </div>
-    <p class="note">One file, base + icon already colored — import it into Bambu Studio and it slices as multi-color automatically, no manual filament assignment needed.</p>
+    <p class="note">Each icon exports as its own multi-color 3MF — base + icon colors already applied, no manual filament assignment needed in Bambu Studio.</p>
   </aside>
 
   <main class="viewer">
