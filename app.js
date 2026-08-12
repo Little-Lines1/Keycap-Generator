@@ -211,7 +211,10 @@ function openFile(file) {
 }
 
 dropzone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', (e) => openFiles(e.target.files));
+fileInput.addEventListener('change', (e) => {
+  openFiles(e.target.files);
+  fileInput.value = ''; // reset so selecting the same/another file again still fires 'change'
+});
 ['dragenter', 'dragover'].forEach(ev =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
 ['dragleave', 'drop'].forEach(ev =>
