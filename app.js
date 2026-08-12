@@ -4,11 +4,12 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 
 /* ---------------------------------------------------------------
    Keycap Forge
-   Generates a flat G20-profile keycap (16.3 x 16.3 x 4.5mm) with a
-   two-color pixel-art icon fused into the top face, oriented flat-
-   side-down so it prints without supports. Exports one multi-color
-   3MF (base + icon as separate colored objects) that Bambu Studio
-   reads natively — no manual per-object filament assignment needed.
+   Generates flat G20-profile keycaps (16.3 x 16.3 x 4.5mm) with a
+   multi-color pixel-art icon fused into the top face, oriented flat-
+   side-down so they print without supports. Exports each as one
+   multi-color 3MF (base + icon colors as separate colored objects)
+   that Bambu Studio reads natively. Supports batch upload — every
+   uploaded icon gets its own job with its own settings.
    --------------------------------------------------------------- */
 
 const CAP = 16.3;
@@ -18,18 +19,31 @@ const SOCKET_MARGIN = 0.2;
 const CROSS_LEN = 4.0;
 const CROSS_W = 1.3;
 const BASE_COLOR = '#000000'; // keycap body is always black, by design
+const MAX_JOBS = 15;
 
-const state = {
-  img: null,
-  scalePct: 70,
-  resolution: 400,
-  mode: 'color',      // 'color' = keep the upload's own colors, 'bw' = white icon
-  iconColor: '#ffffff',
-  mask: null,
-  _colors: null,
-  _iconHex: '#ffffff',
-};
+// ---- Batch state: one job per uploaded icon ----
+let jobs = [];
+let activeId = null;
+let nextId = 1;
 
+function activeJob() {
+  return jobs.find(j => j.id === activeId) || null;
+}
+function makeJob(file, img) {
+  return {
+    id: nextId++,
+    name: file.name,
+    img,
+    scalePct: 70,
+    resolution: 400,
+    mode: 'color',
+    mask: null,
+    _colors: null,
+    _groups: null,
+  };
+}
+
+// ---- DOM ----
 const dropzone = document.getElementById('dropzone');
 const dzTitle = document.getElementById('dz-title');
 const fileInput = document.getElementById('file-input');
@@ -40,9 +54,13 @@ const resVal = document.getElementById('res-val');
 const seg = document.querySelectorAll('.seg button');
 const darkIconNote = document.getElementById('dark-icon-note');
 const dl3mfBtn = document.getElementById('dl-3mf');
+const dlAllBtn = document.getElementById('dl-all');
 const emptyState = document.getElementById('empty-state');
 const viewerHint = document.getElementById('viewer-hint');
+const jobListEl = document.getElementById('job-list');
+const settingsPanel = document.getElementById('settings-panel');
 
+// ---- Three.js setup ----
 const wrap = document.getElementById('canvas-wrap');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 500);
@@ -86,8 +104,63 @@ function animate() {
 animate();
 
 // ---------------------------------------------------------------
+// Job list UI
+// ---------------------------------------------------------------
+function renderJobList() {
+  jobListEl.innerHTML = '';
+  if (!jobs.length) { jobListEl.style.display = 'none'; return; }
+  jobListEl.style.display = 'flex';
+
+  jobs.forEach(job => {
+    const row = document.createElement('div');
+    row.className = 'job-row' + (job.id === activeId ? ' active' : '');
+    row.innerHTML = `
+      <span class="job-name">${job.name}</span>
+      <button class="job-remove" title="Remove">×</button>
+    `;
+    row.querySelector('.job-name').addEventListener('click', () => selectJob(job.id));
+    row.querySelector('.job-remove').addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeJob(job.id);
+    });
+    jobListEl.appendChild(row);
+  });
+}
+
+function selectJob(id) {
+  activeId = id;
+  const job = activeJob();
+  if (!job) return;
+  scaleSlider.value = job.scalePct;
+  scaleVal.textContent = job.scalePct + '%';
+  resSlider.value = job.resolution;
+  resVal.textContent = `${job.resolution} × ${job.resolution}`;
+  seg.forEach(b => b.classList.toggle('active', b.dataset.mode === job.mode));
+  renderJobList();
+  rebuild();
+}
+
+function removeJob(id) {
+  jobs = jobs.filter(j => j.id !== id);
+  if (activeId === id) activeId = jobs.length ? jobs[0].id : null;
+  renderJobList();
+  if (activeId) {
+    selectJob(activeId);
+  } else {
+    if (capGroup) { scene.remove(capGroup); capGroup = null; }
+    settingsPanel.style.display = 'none';
+    emptyState.style.display = 'flex';
+    viewerHint.style.display = 'none';
+    dl3mfBtn.disabled = true;
+    dlAllBtn.disabled = true;
+    dzTitle.textContent = 'Drop image or click to upload';
+    dropzone.classList.remove('has-image', 'error');
+  }
+}
+
+// ---------------------------------------------------------------
 // Image handling — SVG only, any aspect ratio (auto-centered/padded
-// into a square, so nothing needs to be pre-cropped by hand).
+// into a square). Multiple files at once, up to MAX_JOBS.
 // ---------------------------------------------------------------
 function showDzError(msg) {
   dzTitle.textContent = msg;
@@ -95,10 +168,17 @@ function showDzError(msg) {
   dropzone.classList.add('error');
 }
 
+function openFiles(fileList) {
+  const files = Array.from(fileList || []).slice(0, MAX_JOBS - jobs.length);
+  if (!files.length) return;
+  files.forEach(openFile);
+}
+
 function openFile(file) {
   if (!file) return;
   const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg');
   if (!isSvg) { showDzError('Only .svg files are supported'); return; }
+  if (jobs.length >= MAX_JOBS) { showDzError(`Max ${MAX_JOBS} icons at once`); return; }
 
   const textReader = new FileReader();
   textReader.onload = (e) => {
@@ -113,11 +193,14 @@ function openFile(file) {
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => {
-      state.img = img;
-      dzTitle.textContent = file.name;
+      const job = makeJob(file, img);
+      jobs.push(job);
       dropzone.classList.remove('error');
       dropzone.classList.add('has-image');
-      rebuild();
+      dzTitle.textContent = jobs.length === 1 ? file.name : `${jobs.length} icons loaded`;
+      settingsPanel.style.display = 'block';
+      dlAllBtn.disabled = jobs.length < 1;
+      selectJob(job.id);
       URL.revokeObjectURL(url);
     };
     img.onerror = () => showDzError('Could not load this SVG');
@@ -128,27 +211,30 @@ function openFile(file) {
 }
 
 dropzone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', (e) => openFile(e.target.files[0]));
+fileInput.addEventListener('change', (e) => openFiles(e.target.files));
 ['dragenter', 'dragover'].forEach(ev =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
 ['dragleave', 'drop'].forEach(ev =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove('drag'); }));
-dropzone.addEventListener('drop', (e) => openFile(e.dataTransfer.files[0]));
+dropzone.addEventListener('drop', (e) => openFiles(e.dataTransfer.files));
 
 scaleSlider.addEventListener('input', () => {
-  state.scalePct = +scaleSlider.value;
-  scaleVal.textContent = state.scalePct + '%';
+  const job = activeJob(); if (!job) return;
+  job.scalePct = +scaleSlider.value;
+  scaleVal.textContent = job.scalePct + '%';
   scheduleRebuild();
 });
 resSlider.addEventListener('input', () => {
-  state.resolution = +resSlider.value;
-  resVal.textContent = `${state.resolution} × ${state.resolution}`;
+  const job = activeJob(); if (!job) return;
+  job.resolution = +resSlider.value;
+  resVal.textContent = `${job.resolution} × ${job.resolution}`;
   scheduleRebuild();
 });
 seg.forEach(btn => btn.addEventListener('click', () => {
+  const job = activeJob(); if (!job) return;
   seg.forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  state.mode = btn.dataset.mode;
+  job.mode = btn.dataset.mode;
   rebuild();
 }));
 
@@ -230,16 +316,13 @@ function rgbToHex(r, g, b) {
 // Simple k-means over the icon pixels' RGB values, so a logo that is
 // itself multi-color (e.g. YouTube's red badge + white triangle) comes
 // out as several distinct print colors instead of being flattened into
-// one averaged blob. Returns up to K non-empty clusters as
-// { hex, assign(pixelIndex) } — clusters with no pixels are dropped.
+// one averaged blob. Returns up to K non-empty clusters.
 function clusterIconColors(colors, mask, K, N) {
   const idxs = [];
   for (let i = 0; i < mask.length; i++) if (mask[i] === 1) idxs.push(i);
-  if (!idxs.length) return [];
+  if (!idxs.length) return { clusters: [], assignment: new Uint8Array(mask.length) };
 
   const k = Math.min(K, idxs.length);
-  // seed centroids evenly across the icon pixel list for a stable,
-  // deterministic start (no RNG needed)
   let centroids = [];
   for (let c = 0; c < k; c++) {
     const pick = idxs[Math.floor((c + 0.5) * idxs.length / k)];
@@ -266,12 +349,9 @@ function clusterIconColors(colors, mask, K, N) {
     centroids = sums.map((s, c) => s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : centroids[c]);
   }
 
-  // A smooth gradient (e.g. Instagram's purple-to-orange) produces
-  // noisy, speckled per-pixel cluster assignment right at the color
-  // boundaries — technically correct, but it shreds that color region
-  // into hundreds of single-pixel islands once turned into boxes. A
-  // couple of majority-vote passes over each pixel's neighbors cleans
-  // that speckling up before any geometry gets built from it.
+  // A smooth gradient produces noisy, speckled per-pixel cluster
+  // assignment right at the color boundaries — a couple of majority-
+  // vote passes cleans that speckling up before any geometry is built.
   for (let pass = 0; pass < 2; pass++) {
     const next = assignment.slice();
     for (const i of idxs) {
@@ -316,11 +396,6 @@ function boxDesc(sx, sy, sz, cx, cy, cz) {
   return { sx, sy, sz, cx, cy, cz };
 }
 
-// Run-length-encode each row of a boolean flag array into horizontal
-// spans instead of one box per pixel — at ~400x400 that's the
-// difference between a handful of wide strips and 160,000 individual
-// boxes. Keeps both the live preview and the exported file light
-// regardless of detail level or how many color groups there are.
 // Greedy 2D rectangle decomposition: for each still-unclaimed pixel,
 // grow a rectangle right as far as it can, then down as far as that
 // whole width stays set, then mark it claimed and move on. This turns
@@ -403,49 +478,37 @@ function crossFrameBoxes(yBottom, yTop) {
   return b;
 }
 
-function buildKeycap() {
-  if (!state.mask) return { groups: [] };
+function buildKeycap(job) {
+  if (!job.mask) return { groups: [] };
 
-  const N = state.resolution;
+  const N = job.resolution;
   const groups = [];
 
-  // Icon/pixel layer sits at the TOP of the local model (Y near
-  // TOTAL_H) with the socket body underneath — so a plain camera above
-  // the model shows the icon directly, no flip/rotate trick needed.
   const pixelCenterY = TOTAL_H - PIXEL_H / 2;
   const socketTop = TOTAL_H - PIXEL_H - SOCKET_MARGIN;
   const marginCenterY = socketTop + SOCKET_MARGIN / 2;
 
-  // Base color fills straight through from the socket top to the very
-  // top face (no separate uniform "margin slab") — one fewer seam for
-  // every base pixel, since it's now a single box in Y.
-  const baseFlags = new Uint8Array(state.mask.length);
-  for (let i = 0; i < state.mask.length; i++) baseFlags[i] = state.mask[i] === 0 ? 1 : 0;
+  const baseFlags = new Uint8Array(job.mask.length);
+  for (let i = 0; i < job.mask.length; i++) baseFlags[i] = job.mask[i] === 0 ? 1 : 0;
   const baseBoxes = rleBoxesFromFlags(baseFlags, N, socketTop + (TOTAL_H - socketTop) / 2, TOTAL_H - socketTop);
   baseBoxes.push(...crossFrameBoxes(0, socketTop));
-
-  // The margin backing under the icon is decomposed ONCE from the
-  // icon's overall footprint (all colors combined), not once per
-  // color cluster — a gradient logo can split into several scattered
-  // color regions, and backing each of those separately fragmented
-  // the base object badly. One shared backing avoids that entirely.
-  baseBoxes.push(...rleBoxesFromFlags(state.mask, N, marginCenterY, SOCKET_MARGIN));
+  baseBoxes.push(...rleBoxesFromFlags(job.mask, N, marginCenterY, SOCKET_MARGIN));
   groups.push({ boxes: baseBoxes, hex: BASE_COLOR });
 
-  if (state.mode === 'color' && state._colors) {
-    const { clusters, assignment } = clusterIconColors(state._colors, state.mask, 3, N);
+  if (job.mode === 'color' && job._colors) {
+    const { clusters, assignment } = clusterIconColors(job._colors, job.mask, 3, N);
     darkIconNote.style.display = clusters.some(c => c.hex === '#ffffff') ? 'block' : 'none';
     clusters.forEach(c => {
-      const flags = new Uint8Array(state.mask.length);
-      for (let i = 0; i < state.mask.length; i++) {
-        flags[i] = (state.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
+      const flags = new Uint8Array(job.mask.length);
+      for (let i = 0; i < job.mask.length; i++) {
+        flags[i] = (job.mask[i] === 1 && assignment[i] === c.id) ? 1 : 0;
       }
       const boxes = rleBoxesFromFlags(flags, N, pixelCenterY, PIXEL_H);
       if (boxes.length) groups.push({ boxes, hex: c.hex });
     });
   } else {
     darkIconNote.style.display = 'none';
-    const boxes = rleBoxesFromFlags(state.mask, N, pixelCenterY, PIXEL_H); // mask is already 0/1
+    const boxes = rleBoxesFromFlags(job.mask, N, pixelCenterY, PIXEL_H);
     if (boxes.length) groups.push({ boxes, hex: '#ffffff' });
   }
 
@@ -459,19 +522,20 @@ function scheduleRebuild() {
 }
 
 function rebuild() {
-  if (!state.img) return;
+  const job = activeJob();
+  if (!job) return;
 
-  const { mask, colors } = sampleImageToMask(state.img, state.resolution, state.scalePct);
-  state.mask = mask;
-  state._colors = colors;
+  const { mask, colors } = sampleImageToMask(job.img, job.resolution, job.scalePct);
+  job.mask = mask;
+  job._colors = colors;
 
   if (capGroup) { scene.remove(capGroup); }
-  const { groups } = buildKeycap();
+  const { groups } = buildKeycap(job);
   capGroup = new THREE.Group();
   groups.forEach(g => capGroup.add(instancedPreview(g.boxes, g.hex)));
   scene.add(capGroup);
 
-  state._groups = groups;
+  job._groups = groups;
 
   emptyState.style.display = 'none';
   viewerHint.style.display = 'block';
@@ -479,19 +543,12 @@ function rebuild() {
 }
 
 // ---------------------------------------------------------------
-// Multi-color 3MF export — one file, base + up to 3 icon colors as
-// separate colored objects, read natively by Bambu Studio (no manual
-// per-object filament assignment needed on your end).
+// Multi-color 3MF export — one file per job, base + up to 3 icon
+// colors as separate colored objects, read natively by Bambu Studio.
 // ---------------------------------------------------------------
 function meshGeoFromBoxes(boxes) {
   const geoms = boxes.map(b => boxGeom(b.sx, b.sy, b.sz, b.cx, b.cy, b.cz));
   const merged = mergeGeometries(geoms, false);
-  // Each box's per-face vertices carry their own normal/uv, so a plain
-  // position-only match never welds anything — box A's and box B's
-  // touching face look identical in space but "different" attribute-
-  // wise. Drop normal/uv first so welding only cares about position,
-  // then rebuild normals afterwards. This is what was showing up in
-  // Bambu Studio as thousands of "open edges" needing repair.
   merged.deleteAttribute('normal');
   merged.deleteAttribute('uv');
   const welded = mergeVertices(merged, 1e-5);
@@ -499,7 +556,6 @@ function meshGeoFromBoxes(boxes) {
   return welded;
 }
 
-// local (Y-up, flat face at y=0) -> print (Z-up, flat face at z=0)
 // local (Y-up, icon layer at top y=TOTAL_H) -> print (Z-up, icon flat
 // face on the bed at z=0). Rotate -90° about X (x'=x, y'=z, z'=-y),
 // then shift up by TOTAL_H so the icon face lands at z=0 and the
@@ -634,22 +690,43 @@ function buildZip(files) {
   return new Blob([...chunks, ...central, new Uint8Array(end.buffer)], { type: 'application/octet-stream' });
 }
 
-function export3MF() {
-  if (!state._groups || !state._groups.length) return;
-  const groupsWithGeo = state._groups.map(g => ({ hex: g.hex, geo: meshGeoFromBoxes(g.boxes) }));
+function safeFilename(name) {
+  return name.replace(/\.svg$/i, '').replace(/[^a-z0-9_-]+/gi, '-').toLowerCase() || 'keycap';
+}
 
+function build3MFBlob(job) {
+  const groupsWithGeo = job._groups.map(g => ({ hex: g.hex, geo: meshGeoFromBoxes(g.boxes) }));
   const modelXml = build3MFModelXml(groupsWithGeo);
-  const blob = buildZip([
+  return buildZip([
     { name: '[Content_Types].xml', data: CONTENT_TYPES_XML },
     { name: '_rels/.rels', data: RELS_XML },
     { name: '3D/3dmodel.model', data: modelXml },
   ]);
+}
 
+function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'keycap.3mf';
+  a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
 
-dl3mfBtn.addEventListener('click', export3MF);
+dl3mfBtn.addEventListener('click', () => {
+  const job = activeJob();
+  if (!job || !job._groups || !job._groups.length) return;
+  downloadBlob(build3MFBlob(job), `${safeFilename(job.name)}.3mf`);
+});
+
+dlAllBtn.addEventListener('click', async () => {
+  for (const job of jobs) {
+    if (!job._groups) {
+      const { mask, colors } = sampleImageToMask(job.img, job.resolution, job.scalePct);
+      job.mask = mask; job._colors = colors;
+      job._groups = buildKeycap(job).groups;
+    }
+    if (!job._groups.length) continue;
+    downloadBlob(build3MFBlob(job), `${safeFilename(job.name)}.3mf`);
+    await new Promise(r => setTimeout(r, 300)); // avoid the browser blocking rapid multi-downloads
+  }
+});
